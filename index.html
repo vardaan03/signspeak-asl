@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Real-time ASL Sign Language to English translator using your webcam." />
+  <title>SignSpeak — ASL Translator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <!-- Loading Overlay -->
+  <div id="loading-overlay" class="loading-overlay">
+    <div class="loading-content">
+      <div class="loading-spinner"></div>
+      <h2 class="loading-title">SignSpeak</h2>
+      <p class="loading-text">Loading hand + face detection models...</p>
+    </div>
+  </div>
+
+  <!-- Error Overlay -->
+  <div id="error-overlay" class="error-overlay hidden">
+    <div class="error-content">
+      <div class="error-icon">!</div>
+      <h2 class="error-title">Something went wrong</h2>
+      <p id="error-message" class="error-text"></p>
+      <button id="error-retry-btn" class="btn btn-primary">Try Again</button>
+    </div>
+  </div>
+
+  <!-- Side Menu Overlay -->
+  <div id="side-menu-overlay" class="side-menu-overlay"></div>
+
+  <!-- Side Menu Panel -->
+  <aside id="side-menu-panel" class="side-menu-panel">
+    <div class="side-menu-header">
+      <div>
+        <h2 class="side-menu-title">Sign Guide</h2>
+        <p class="side-menu-subtitle">All available signs & gestures</p>
+      </div>
+      <button id="side-menu-close" class="side-menu-close-btn" aria-label="Close">&times;</button>
+    </div>
+    <div class="side-menu-search-container">
+      <input id="side-menu-search" class="side-menu-search" type="text" placeholder="Search signs..." autocomplete="off" />
+    </div>
+    <div id="side-menu-content" class="side-menu-body">
+      <!-- Populated by JS -->
+    </div>
+  </aside>
+
+  <!-- Main App -->
+  <div id="app" class="app hidden">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-brand">
+        <h1 class="brand-title">SignSpeak</h1>
+        <span class="brand-sep">/</span>
+        <span class="brand-subtitle">ASL to English</span>
+      </div>
+      <div class="header-status">
+        <div id="hand-status" class="status-pill status-inactive">
+          <span class="status-dot"></span>
+          <span class="status-text">No hand</span>
+        </div>
+        <div id="mirror-status" class="mirror-pill" title="Mirror detection">
+          <span id="mirror-icon" class="mirror-icon-text">?</span>
+          <span id="mirror-text" class="mirror-text">Detecting...</span>
+        </div>
+        <button id="side-menu-toggle" class="btn btn-outline" title="Open sign guide">
+          Guide
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- Left: Camera Feed -->
+      <section class="camera-section">
+        <div class="camera-container">
+          <video id="webcam" class="webcam-video" autoplay playsinline></video>
+          <canvas id="landmark-canvas" class="landmark-canvas"></canvas>
+          <div class="camera-live-badge">
+            <span class="live-dot"></span> LIVE
+          </div>
+        </div>
+      </section>
+
+      <!-- Right: Detection + Sentence -->
+      <section class="output-section">
+        <!-- Detected Sign -->
+        <div class="detect-box">
+          <div class="detect-top-row">
+            <span class="detect-label">Detected</span>
+            <span id="confidence-text" class="detect-conf">--</span>
+          </div>
+
+          <div class="detect-ring-wrapper">
+            <svg class="hold-ring-svg" viewBox="0 0 120 120">
+              <circle class="hold-ring-bg" cx="60" cy="60" r="54" />
+              <circle id="hold-ring-progress" class="hold-ring-progress" cx="60" cy="60" r="54"
+                      stroke-dasharray="339.292" stroke-dashoffset="339.292"
+                      transform="rotate(-90 60 60)" />
+            </svg>
+            <div id="detected-letter" class="detect-letter">?</div>
+          </div>
+
+          <div id="hold-label" class="hold-label"></div>
+
+          <div class="conf-bar-wrap">
+            <div id="confidence-bar" class="conf-bar" style="width:0%"></div>
+          </div>
+
+          <!-- Top-3 candidates -->
+          <div id="candidates-display" class="candidates-row"></div>
+        </div>
+
+        <!-- Sentence -->
+        <div class="sentence-box">
+          <div class="sentence-top-row">
+            <span class="sentence-label">Text</span>
+            <span class="sentence-hint">Hold steady to add</span>
+          </div>
+          <div id="sentence-display" class="sentence-display">
+            <span class="sentence-placeholder">Start signing...</span>
+          </div>
+          <div class="sentence-controls">
+            <button id="btn-space" class="btn" title="Space">Space</button>
+            <button id="btn-backspace" class="btn" title="Delete">Delete</button>
+            <button id="btn-clear" class="btn btn-warn" title="Clear">Clear</button>
+            <button id="btn-speak" class="btn btn-accent" title="Speak">Speak</button>
+          </div>
+        </div>
+
+        <!-- Quick Reference (collapsed by default) -->
+        <div class="ref-box">
+          <div class="ref-top-row">
+            <span class="ref-label">Quick Ref</span>
+            <button id="btn-toggle-ref" class="btn-icon" title="Toggle">&darr;</button>
+          </div>
+          <div id="reference-grid" class="reference-grid collapsed">
+            <!-- Populated by JS -->
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
