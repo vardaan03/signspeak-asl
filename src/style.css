@@ -502,6 +502,19 @@ body {
   gap: 6px;
 }
 
+.side-menu-image-gallery {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 15px;
+}
+.side-menu-chart-img {
+  width: 100%;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+}
+
 .side-menu-card {
   display: flex; align-items: center; gap: 10px;
   padding: 8px 10px;

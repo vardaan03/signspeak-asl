@@ -610,13 +610,13 @@ export function getCustomGestureNames() {
 
 // Reference data for the side menu (custom gestures beyond fingerpose)
 export const customSignsReference = [
-  { letter: 'TY', name: 'Thank You', desc: 'Flat hand from chin forward', motion: true, bodyRelative: true },
-  { letter: 'PL', name: 'Please', desc: 'Flat hand on chest', motion: false, bodyRelative: true },
-  { letter: 'TH', name: 'Think', desc: 'Index finger to temple', motion: false, bodyRelative: true },
-  { letter: 'EA', name: 'Eat', desc: 'Fingers bunched to mouth', motion: false, bodyRelative: true },
-  { letter: 'OK', name: 'OK', desc: 'Thumb & index circle, other fingers up', motion: false, bodyRelative: false },
-  { letter: 'PC', name: 'Peace', desc: 'Index & middle up, spread apart', motion: false, bodyRelative: false },
-  { letter: 'CL', name: 'Call Me', desc: 'Thumb & pinky out, others curled', motion: false, bodyRelative: false },
-  { letter: 'RK', name: 'Rock On', desc: 'Index & pinky up, middle & ring curled', motion: false, bodyRelative: false },
-  { letter: 'GD', name: 'Good', desc: 'Thumbs up', motion: false, bodyRelative: false },
+  { letter: '🙏', name: 'Thank You', desc: 'Flat hand from chin forward', motion: true, bodyRelative: true },
+  { letter: '🥺', name: 'Please', desc: 'Flat hand on chest', motion: false, bodyRelative: true },
+  { letter: '🤔', name: 'Think', desc: 'Index finger to temple', motion: false, bodyRelative: true },
+  { letter: '🍕', name: 'Eat', desc: 'Fingers bunched to mouth', motion: false, bodyRelative: true },
+  { letter: '👌', name: 'OK', desc: 'Thumb & index circle, other fingers up', motion: false, bodyRelative: false },
+  { letter: '✌️', name: 'Peace', desc: 'Index & middle up, spread apart', motion: false, bodyRelative: false },
+  { letter: '🤙', name: 'Call Me', desc: 'Thumb & pinky out, others curled', motion: false, bodyRelative: false },
+  { letter: '🤘', name: 'Rock On', desc: 'Index & pinky up, middle & ring curled', motion: false, bodyRelative: false },
+  { letter: '👍', name: 'Good', desc: 'Thumbs up', motion: false, bodyRelative: false },
 ];

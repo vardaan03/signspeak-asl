@@ -7,7 +7,6 @@
 import { alphabetReference } from './gestures/alphabet.js';
 import { commonSignsReference } from './gestures/commonSigns.js';
 import { customSignsReference } from './gestures/landmarkAnalyzer.js';
-import { getLetterIcon, getSignIcon, getCustomIcon } from './handIcons.js';
 
 // DOM references
 let els = {};
@@ -74,16 +73,6 @@ function buildReferenceGrid() {
   `).join('');
 }
 
-function getHandSVG(letter, desc) {
-  if (letter && letter.length === 1 && letter.match(/[A-Z]/i)) {
-    return getLetterIcon(letter);
-  }
-  if (desc && (desc.includes('chin') || desc.includes('chest') || desc.includes('temple') || desc.includes('mouth') || desc.includes('Thumb') || desc.includes('Index'))) {
-    return getCustomIcon(letter || desc);
-  }
-  return getSignIcon(desc || letter);
-}
-
 function buildSideMenu() {
   let html = '';
 
@@ -92,12 +81,15 @@ function buildSideMenu() {
     <div class="side-menu-section">
       <h3 class="side-menu-section-title">Alphabet (A-Z)</h3>
       <p class="side-menu-section-subtitle">Fingerspelling \u2014 hold each sign for detection</p>
+      <div class="side-menu-image-gallery">
+        <img src="/signs/asl_alphabet_am.png" alt="ASL Alphabet A through M" class="side-menu-chart-img" loading="lazy" />
+        <img src="/signs/asl_alphabet_nz.png" alt="ASL Alphabet N through Z" class="side-menu-chart-img" loading="lazy" />
+      </div>
       <div class="side-menu-grid">
   `;
 
   for (const item of alphabetReference) {
     const isMotion = item.desc.includes('Trace');
-    const svg = getHandSVG(item.letter, item.desc);
     const badge = isMotion
       ? '<span class="side-badge badge-motion">MOTION</span>'
       : '<span class="side-badge badge-static">STATIC</span>';
@@ -105,7 +97,7 @@ function buildSideMenu() {
 
     html += `
       <div class="${cardClass}" data-search="${item.letter} ${item.desc}">
-        <div class="hand-avatar">${svg}</div>
+        <div class="side-menu-card-letter">${item.letter}</div>
         <div class="side-menu-card-info">
           <span class="side-menu-card-name">${item.letter}</span>
           <span class="side-menu-card-desc">${item.desc}</span>
@@ -122,14 +114,16 @@ function buildSideMenu() {
     <div class="side-menu-section">
       <h3 class="side-menu-section-title">Common Signs</h3>
       <p class="side-menu-section-subtitle">Basic gestures detected by finger position</p>
+      <div class="side-menu-image-gallery">
+        <img src="/signs/asl_common_signs.png" alt="Common ASL Signs Reference" class="side-menu-chart-img" loading="lazy" />
+      </div>
       <div class="side-menu-grid">
   `;
 
   for (const item of commonSignsReference) {
-    const svg = getHandSVG(item.letter, item.desc);
     html += `
       <div class="side-menu-card" data-search="${item.letter} ${item.desc}">
-        <div class="hand-avatar">${svg}</div>
+        <div class="side-menu-card-letter">${item.letter}</div>
         <div class="side-menu-card-info">
           <span class="side-menu-card-name">${item.letter}</span>
           <span class="side-menu-card-desc">${item.desc}</span>
@@ -150,7 +144,6 @@ function buildSideMenu() {
   `;
 
   for (const item of customSignsReference) {
-    const svg = getHandSVG(item.letter, item.desc);
     const isBody = item.bodyRelative;
     const isMotion = item.motion;
     const badge = isBody
@@ -162,7 +155,7 @@ function buildSideMenu() {
 
     html += `
       <div class="${cardClass}" data-search="${item.name} ${item.desc}">
-        <div class="hand-avatar">${svg}</div>
+        <div class="side-menu-card-letter">${item.letter}</div>
         <div class="side-menu-card-info">
           <span class="side-menu-card-name">${item.name}</span>
           <span class="side-menu-card-desc">${item.desc}</span>
