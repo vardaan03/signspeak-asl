@@ -152,7 +152,8 @@ function detectionLoop(timestamp) {
 
       // Draw signing region box
       const region = getSigningRegion();
-      const gesture = recognizeGesture(landmarks, face);
+      const allHandsLandmarks = hands.map((h) => h.landmarks);
+      const gesture = recognizeGesture(landmarks, face, allHandsLandmarks);
       drawSigningRegion(canvasCtx, region, canvasElement.width, canvasElement.height, gesture.inRegion);
 
       // Draw all hands

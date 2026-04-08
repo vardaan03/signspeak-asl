@@ -275,7 +275,7 @@ function resolveConflicts(fingerposeGestures, customResults, features) {
 /**
  * Recognize a gesture from hand landmarks
  */
-export function recognizeGesture(landmarks, face) {
+export function recognizeGesture(landmarks, face, allHands = []) {
   const noResult = { name: null, confidence: 0, stable: false, holdReady: false, holdProgress: 0, raw: [], inRegion: true };
 
   if (!landmarks || landmarks.length === 0) {
@@ -307,6 +307,22 @@ export function recognizeGesture(landmarks, face) {
 
   // Extract hand features from SLOW smoothed for stable disambiguation
   const features = extractHandFeatures(slowSmoothed);
+
+  // --- Two-Handed language check (e.g. BSL) ---
+  if (currentPack.analyzeInteraction && allHands.length === 2) {
+    const interactionMatch = currentPack.analyzeInteraction(allHands);
+    if (interactionMatch) {
+      return {
+        name: interactionMatch.name,
+        confidence: interactionMatch.score,
+        stable: true,
+        holdReady: true,
+        holdProgress: 1,
+        raw: [{ name: interactionMatch.name, score: interactionMatch.score }],
+        inRegion,
+      };
+    }
+  }
 
   // --- Motion-based signs (J, Z) — use raw landmarks for motion sensitivity ---
   let motionResults = [];

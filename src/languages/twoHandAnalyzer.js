@@ -1,4 +1,24 @@
-import { dist3D, vec, dot, cross, normalize, getFingerTipDistance } from '../gestures/landmarkAnalyzer.js';
+// Local 3D math helpers for two-hand interaction analysis
+function dist3D(p1, p2) {
+  return Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2 + (p1.z - p2.z) ** 2);
+}
+function vec(p1, p2) {
+  return { x: p2.x - p1.x, y: p2.y - p1.y, z: p2.z - p1.z };
+}
+function dot(v1, v2) {
+  return v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
+}
+function cross(v1, v2) {
+  return {
+    x: v1.y * v2.z - v1.z * v2.y,
+    y: v1.z * v2.x - v1.x * v2.z,
+    z: v1.x * v2.y - v1.y * v2.x
+  };
+}
+function normalize(v) {
+  const len = Math.sqrt(dot(v, v));
+  return len === 0 ? { x: 0, y: 0, z: 0 } : { x: v.x / len, y: v.y / len, z: v.z / len };
+}
 
 /**
  * Two-Hand Interaction Analyzer

@@ -1,11 +1,12 @@
 import { aslPack } from './asl/index.js';
+import { bslPack } from './bsl/index.js';
 
 /**
  * Registry of all available language packs.
- * Currently only ASL is fully implemented. BSL and others can be added here.
  */
 const languageRegistry = {
   'asl': aslPack,
+  'bsl': bslPack,
 };
 
 let currentLanguageId = 'asl';
