@@ -1,14 +1,19 @@
 /**
  * Landmark Analyzer — Custom Gesture Detection Beyond Fingerpose
- * 
+ * (Accuracy-Tuned Version)
+ *
  * Uses raw MediaPipe 3D hand landmarks (21 points) to detect gestures
  * that Fingerpose cannot handle:
  * - Palm orientation (facing camera, away, sideways)
  * - Wrist angle and rotation
- * - Inter-finger distances (pinch, spread)
+ * - Inter-finger distances (pinch, spread, crossing)
  * - Hand openness vs closedness
  * - Compound gestures combining multiple features
- * 
+ * - Angular joint features (rotation/scale invariant)
+ * - Finger crossing detection (R)
+ * - Precise thumb position analysis (A/S/E/T/M/N)
+ * - Wrist angle for orientation-dependent letters (G/H vs D/U)
+ *
  * MediaPipe Landmark indices:
  *   0: WRIST
  *   1-4: THUMB (CMC, MCP, IP, TIP)
@@ -65,57 +70,36 @@ function dist2D(a, b) {
 // Palm & Hand Feature Extraction
 // ==========================================
 
-/**
- * Get palm normal vector (indicates which way the palm is facing)
- * Uses wrist(0), index_mcp(5), pinky_mcp(17)
- */
 function getPalmNormal(landmarks) {
   const wrist = landmarks[0];
   const indexMCP = landmarks[5];
   const pinkyMCP = landmarks[17];
-
   const v1 = vec(wrist, indexMCP);
   const v2 = vec(wrist, pinkyMCP);
   return normalize(cross(v1, v2));
 }
 
-/**
- * Check if palm is facing the camera (z-component of normal)
- * Returns value from -1 (facing away) to 1 (facing camera)
- */
 function getPalmFacing(landmarks) {
   const normal = getPalmNormal(landmarks);
-  // Positive z means facing camera (MediaPipe z increases toward camera)
-  return -normal.z; // Negate because MediaPipe z is negative toward camera
+  return -normal.z;
 }
 
-/**
- * Get overall hand openness (0 = fully closed fist, 1 = fully open)
- * Measures average fingertip distance from wrist relative to palm size
- */
 function getHandOpenness(landmarks) {
   const wrist = landmarks[0];
   const middleMCP = landmarks[9];
   const palmSize = dist3D(wrist, middleMCP);
-
   if (palmSize < 0.001) return 0;
-
-  const tips = [4, 8, 12, 16, 20]; // thumb, index, middle, ring, pinky tips
+  const tips = [4, 8, 12, 16, 20];
   let totalDist = 0;
   for (const tipIdx of tips) {
     totalDist += dist3D(wrist, landmarks[tipIdx]);
   }
   const avgDist = totalDist / tips.length;
-  // Normalize by palm size; fully open hand typically has ratio ~2.5
   return Math.min(1, avgDist / (palmSize * 2.5));
 }
 
-/**
- * Get finger spread (how far apart the fingers are from each other)
- * 0 = all together, 1 = maximum spread
- */
 function getFingerSpread(landmarks) {
-  const tips = [8, 12, 16, 20]; // index through pinky tips
+  const tips = [8, 12, 16, 20];
   let totalSpread = 0;
   for (let i = 0; i < tips.length - 1; i++) {
     totalSpread += dist2D(landmarks[tips[i]], landmarks[tips[i + 1]]);
@@ -126,8 +110,15 @@ function getFingerSpread(landmarks) {
 }
 
 /**
- * Check if thumb is touching or very close to a specific fingertip
+ * Get spread between index and middle finger tips specifically
+ * (critical for U vs V vs R discrimination)
  */
+function getIndexMiddleSpread(landmarks) {
+  const palmSize = dist2D(landmarks[0], landmarks[9]);
+  if (palmSize < 0.001) return 0;
+  return dist2D(landmarks[8], landmarks[12]) / palmSize;
+}
+
 function isThumbTouching(landmarks, fingerTipIdx) {
   const thumbTip = landmarks[4];
   const fingerTip = landmarks[fingerTipIdx];
@@ -138,9 +129,17 @@ function isThumbTouching(landmarks, fingerTipIdx) {
 }
 
 /**
- * Get wrist angle (how much the hand is rotated/tilted)
- * Returns angle in degrees from vertical
+ * Check if thumb tip is touching a specific finger's PIP or DIP joint
+ * (more precise for D, F detection)
  */
+function isThumbTouchingJoint(landmarks, jointIdx) {
+  const thumbTip = landmarks[4];
+  const joint = landmarks[jointIdx];
+  const palmSize = dist2D(landmarks[0], landmarks[9]);
+  if (palmSize < 0.001) return false;
+  return dist2D(thumbTip, joint) / palmSize < 0.3;
+}
+
 function getWristAngle(landmarks) {
   const wrist = landmarks[0];
   const middleMCP = landmarks[9];
@@ -150,23 +149,44 @@ function getWristAngle(landmarks) {
 }
 
 /**
- * Check if a finger is extended (not curled)
+ * Get the angle of the index finger relative to vertical
+ * Critical for G (horizontal) vs D (vertical)
  */
+function getIndexAngle(landmarks) {
+  const indexMCP = landmarks[5];
+  const indexTip = landmarks[8];
+  const dx = indexTip.x - indexMCP.x;
+  const dy = indexTip.y - indexMCP.y;
+  return Math.atan2(dx, -dy) * (180 / Math.PI); // 0 = up, 90 = right, -90 = left
+}
+
 function isFingerExtended(landmarks, fingerBase, fingerTip) {
   const wrist = landmarks[0];
   const base = landmarks[fingerBase];
   const tip = landmarks[fingerTip];
   const palmLen = dist2D(wrist, base);
   if (palmLen < 0.001) return false;
-  // Extended if tip is further from wrist than base
   return dist2D(wrist, tip) > dist2D(wrist, base) * 0.85;
 }
 
 /**
- * Compute the angle at a joint formed by three landmarks (in degrees).
- * Used for angular feature extraction — rotation/scale invariant.
- * (Google research shows 25% accuracy gain over raw coordinates)
+ * Stricter finger extension check using joint angles
+ * A finger is "fully extended" if PIP angle > 150 degrees
  */
+function isFingerStraight(landmarks, mcp, pip, dip, tip) {
+  const pipAngle = jointAngle(landmarks, mcp, pip, dip);
+  const dipAngle = jointAngle(landmarks, pip, dip, tip);
+  return pipAngle > 140 && dipAngle > 140;
+}
+
+/**
+ * Check if a finger is curled (PIP angle < 120 degrees)
+ */
+function isFingerCurled(landmarks, mcp, pip, dip) {
+  const pipAngle = jointAngle(landmarks, mcp, pip, dip);
+  return pipAngle < 120;
+}
+
 function jointAngle(landmarks, a, b, c) {
   const ba = vec(landmarks[b], landmarks[a]);
   const bc = vec(landmarks[b], landmarks[c]);
@@ -178,22 +198,14 @@ function jointAngle(landmarks, a, b, c) {
   return Math.acos(cosAngle) * (180 / Math.PI);
 }
 
-/**
- * Normalize landmarks relative to palm center and palm size.
- * Makes features invariant to camera distance and position.
- * (Google MediaPipe recommended normalization)
- */
 function normalizeLandmarks(landmarks) {
   const wrist = landmarks[0];
   const middleMCP = landmarks[9];
   const palmSize = dist3D(wrist, middleMCP);
   if (palmSize < 0.001) return landmarks;
-
-  // Palm center = midpoint of wrist and middle MCP
   const cx = (wrist.x + middleMCP.x) / 2;
   const cy = (wrist.y + middleMCP.y) / 2;
   const cz = ((wrist.z || 0) + (middleMCP.z || 0)) / 2;
-
   return landmarks.map(lm => ({
     x: (lm.x - cx) / palmSize,
     y: (lm.y - cy) / palmSize,
@@ -202,32 +214,66 @@ function normalizeLandmarks(landmarks) {
 }
 
 /**
+ * Detect if index and middle fingers are crossed (for R)
+ * Uses 3D analysis: if the middle fingertip crosses over the index finger line
+ */
+function areFingersCrossed(landmarks) {
+  const indexMCP = landmarks[5];
+  const indexTip = landmarks[8];
+  const middleMCP = landmarks[9];
+  const middleTip = landmarks[12];
+
+  // In a normal (uncrossed) hand, middle tip is on the pinky-side of index tip.
+  // When crossed, middle tip moves to the thumb-side of index tip.
+  // We check the x-offset relative to the hand orientation.
+
+  // Direction from index MCP to middle MCP (the "normal" spacing direction)
+  const normalDir = indexMCP.x - middleMCP.x; // positive if index is to the right of middle
+
+  // Direction from index tip to middle tip
+  const tipDir = indexTip.x - middleTip.x;
+
+  // If tipDir has OPPOSITE sign from normalDir, fingers are crossed
+  // (middle tip has crossed over to the other side of index)
+  if (normalDir * tipDir < 0) return true;
+
+  // Also check if tips are very close (touching = crossed attempt)
+  const palmSize = dist2D(landmarks[0], landmarks[9]);
+  if (palmSize < 0.001) return false;
+  const tipDist = dist2D(indexTip, middleTip) / palmSize;
+  return tipDist < 0.15;
+}
+
+/**
  * Get a full feature vector for the hand pose
  */
 export function extractHandFeatures(landmarks) {
   if (!landmarks || landmarks.length < 21) return null;
 
-  // Compute angular features for key joints (rotation/scale invariant)
   const angles = {
-    // PIP joint angles (measures curl)
     indexPIP: jointAngle(landmarks, 5, 6, 7),
     middlePIP: jointAngle(landmarks, 9, 10, 11),
     ringPIP: jointAngle(landmarks, 13, 14, 15),
     pinkyPIP: jointAngle(landmarks, 17, 18, 19),
-    // MCP joint angles (measures extension)
     indexMCP: jointAngle(landmarks, 0, 5, 6),
     middleMCP: jointAngle(landmarks, 0, 9, 10),
-    // Thumb angles
     thumbCMC: jointAngle(landmarks, 0, 1, 2),
     thumbMCP: jointAngle(landmarks, 1, 2, 3),
     thumbIP: jointAngle(landmarks, 2, 3, 4),
+    // DIP joint angles (more precise curl detection)
+    indexDIP: jointAngle(landmarks, 6, 7, 8),
+    middleDIP: jointAngle(landmarks, 10, 11, 12),
+    ringDIP: jointAngle(landmarks, 14, 15, 16),
+    pinkyDIP: jointAngle(landmarks, 18, 19, 20),
   };
 
   return {
     palmFacing: getPalmFacing(landmarks),
     handOpenness: getHandOpenness(landmarks),
     fingerSpread: getFingerSpread(landmarks),
+    indexMiddleSpread: getIndexMiddleSpread(landmarks),
     wristAngle: getWristAngle(landmarks),
+    indexAngle: getIndexAngle(landmarks),
 
     // Finger extension states
     thumbExtended: isFingerExtended(landmarks, 2, 4),
@@ -236,34 +282,53 @@ export function extractHandFeatures(landmarks) {
     ringExtended: isFingerExtended(landmarks, 13, 16),
     pinkyExtended: isFingerExtended(landmarks, 17, 20),
 
+    // Stricter extension (uses joint angles)
+    indexStraight: isFingerStraight(landmarks, 5, 6, 7, 8),
+    middleStraight: isFingerStraight(landmarks, 9, 10, 11, 12),
+
+    // Finger curl states (joint-angle based)
+    indexCurled: isFingerCurled(landmarks, 5, 6, 7),
+    middleCurled: isFingerCurled(landmarks, 9, 10, 11),
+    ringCurled: isFingerCurled(landmarks, 13, 14, 15),
+    pinkyCurled: isFingerCurled(landmarks, 17, 18, 19),
+
+    // Finger crossing (R detection)
+    fingersCrossed: areFingersCrossed(landmarks),
+
     // Finger touching states
     thumbTouchesIndex: isThumbTouching(landmarks, 8),
     thumbTouchesMiddle: isThumbTouching(landmarks, 12),
     thumbTouchesRing: isThumbTouching(landmarks, 16),
     thumbTouchesPinky: isThumbTouching(landmarks, 20),
 
-    // Angular features (rotation/scale invariant — Google research)
+    // Precise thumb-to-joint touching (for D, F)
+    thumbTouchesIndexPIP: isThumbTouchingJoint(landmarks, 6),
+    thumbTouchesMiddlePIP: isThumbTouchingJoint(landmarks, 10),
+    thumbTouchesMiddleDIP: isThumbTouchingJoint(landmarks, 11),
+
+    // Angular features (rotation/scale invariant)
     angles,
 
     // Raw positions for advanced detection
     wrist: landmarks[0],
     thumbTip: landmarks[4],
+    thumbIP: landmarks[3],
+    indexMCP: landmarks[5],
     indexTip: landmarks[8],
+    middleMCP: landmarks[9],
     middleTip: landmarks[12],
     ringTip: landmarks[16],
     pinkyTip: landmarks[20],
+    indexPIP: landmarks[6],
+    middlePIP: landmarks[10],
+    indexDIP: landmarks[7],
+    middleDIP: landmarks[11],
   };
 }
 
 // ==========================================
 // Disambiguation Rules for Confusing Letter Pairs
 // ==========================================
-
-/**
- * Post-process Fingerpose results to disambiguate similar hand shapes.
- * Each rule takes the top gesture name, raw landmarks, and features,
- * and returns a corrected name + adjusted score, or null to keep original.
- */
 
 function getThumbPosition(landmarks) {
   const thumbTip = landmarks[4];
@@ -276,11 +341,8 @@ function getThumbPosition(landmarks) {
   return {
     thumbTip,
     thumbIP,
-    // How far thumb tip is from index MCP (side of fist)
     thumbToIndexSide: dist2D(thumbTip, indexMCP) / (palmSize || 0.001),
-    // How far thumb tip is above fingers (over fist)
     thumbAboveFingers: (indexMCP.y - thumbTip.y) / (palmSize || 0.001),
-    // Thumb tip relative to index/middle MCP midpoint
     thumbBetweenFingers: dist2D(thumbTip, {
       x: (indexMCP.x + middleMCP.x) / 2,
       y: (indexMCP.y + middleMCP.y) / 2,
@@ -297,6 +359,24 @@ function getFingerTipDistance(landmarks, tipA, tipB) {
 /**
  * Disambiguate confusing Fingerpose results using landmark analysis.
  * Returns { name, scoreAdjust } or null.
+ *
+ * Covers ALL known confusing pairs:
+ * - A/S/E/T (fist variants)
+ * - M/N (fist with fingers over thumb)
+ * - U/R (two fingers up: parallel vs crossed)
+ * - V/K (two fingers up: spread vs thumb between)
+ * - B/Hello (flat hand: thumb tucked vs out)
+ * - D/I (single finger: index vs pinky)
+ * - D/G (index up vs index horizontal)
+ * - G/Q (horizontal vs pointing down)
+ * - H/P (two horizontal vs two pointing down)
+ * - H/U/V (two fingers: horizontal vs vertical)
+ * - F/OK (thumb-index circle)
+ * - I/Y (pinky up: thumb curled vs extended)
+ * - L/Y (thumb+finger out)
+ * - C/O (curved: open C vs closed O)
+ * - D/Pointing (index up with vs without thumb-middle touch)
+ * - W/B (3 fingers vs 4 fingers up)
  */
 export function disambiguate(gestureName, landmarks, features) {
   if (!landmarks || !features) return null;
@@ -305,102 +385,245 @@ export function disambiguate(gestureName, landmarks, features) {
   const palmSize = dist2D(landmarks[0], landmarks[9]);
 
   // --- A vs S vs E vs T ---
-  // All are closed fists with different thumb positions
   if (['A', 'S', 'E', 'T'].includes(gestureName)) {
-    // A: thumb alongside fist (thumb tip beside index MCP, not over or tucked)
-    // S: thumb over curled fingers (thumb tip in front of/over fingers)
-    // T: thumb tucked between index and middle (thumb tip between them)
-    // E: all curled, thumb across (thumb tip touching or very close to fingers)
-
     const thumbTip = landmarks[4];
     const indexPIP = landmarks[6];
     const indexDIP = landmarks[7];
     const middlePIP = landmarks[10];
+    const indexTip = landmarks[8];
 
-    // Check if thumb is tucked between index and middle
     const thumbToIndexPIP = dist2D(thumbTip, indexPIP) / (palmSize || 0.001);
     const thumbToMiddlePIP = dist2D(thumbTip, middlePIP) / (palmSize || 0.001);
-    const isTuckedBetween = thumbToIndexPIP < 0.45 && thumbToMiddlePIP < 0.45;
+    const thumbToIndexDIP = dist2D(thumbTip, indexDIP) / (palmSize || 0.001);
 
+    // T: thumb tucked between index and middle (very close to both PIPs)
+    const isTuckedBetween = thumbToIndexPIP < 0.4 && thumbToMiddlePIP < 0.4;
     if (isTuckedBetween) {
-      return { name: 'T', scoreAdjust: 1.5 };
+      return { name: 'T', scoreAdjust: 2.0 };
     }
 
-    // A: thumb is to the side and slightly up
-    if (thumbPos.thumbToIndexSide < 0.5 && thumbPos.thumbAboveFingers > 0.1) {
-      return { name: 'A', scoreAdjust: 1.0 };
+    // E: all fingers curled, thumb tip is BELOW/under the curled finger tips
+    // Thumb crosses below the curled fingers
+    const thumbBelowFingers = thumbTip.y > indexTip.y + 0.01;
+    const allFingersCurled = features.indexCurled && features.middleCurled &&
+                             features.ringCurled && features.pinkyCurled;
+    if (allFingersCurled && thumbBelowFingers && thumbPos.thumbAboveFingers < -0.02) {
+      return { name: 'E', scoreAdjust: 1.5 };
     }
 
-    // S: thumb is over the curled fingers (in front of them)
-    const thumbOverFingers = dist2D(thumbTip, indexDIP) / (palmSize || 0.001);
-    if (thumbOverFingers < 0.4 && !isTuckedBetween) {
+    // A: thumb alongside fist pointing UP, not crossing over
+    if (thumbPos.thumbAboveFingers > 0.15 && thumbPos.thumbToIndexSide < 0.55) {
+      return { name: 'A', scoreAdjust: 1.5 };
+    }
+
+    // S: thumb over curled fingers (in front of them, close to index DIP)
+    if (thumbToIndexDIP < 0.4 && !isTuckedBetween && thumbPos.thumbAboveFingers >= -0.02) {
       return { name: 'S', scoreAdjust: 1.0 };
-    }
-
-    // E: thumb crosses underneath the fingers
-    if (thumbPos.thumbAboveFingers < -0.05) {
-      return { name: 'E', scoreAdjust: 1.0 };
     }
   }
 
   // --- U vs R ---
   // Both have index and middle up. U = parallel, R = crossed
   if (['U', 'R'].includes(gestureName)) {
+    // Use both distance and crossing detection
+    if (features.fingersCrossed) {
+      return { name: 'R', scoreAdjust: 2.0 };
+    }
     const indexMiddleDist = getFingerTipDistance(landmarks, 8, 12);
-    // R: fingers crossed/touching (tips very close)
-    // U: fingers parallel (tips separated)
-    if (indexMiddleDist < 0.25) {
+    if (indexMiddleDist < 0.18) {
+      // Very close tips — likely crossed or attempting R
       return { name: 'R', scoreAdjust: 1.5 };
-    } else {
-      return { name: 'U', scoreAdjust: 1.0 };
+    }
+    if (indexMiddleDist >= 0.18 && indexMiddleDist < 0.4) {
+      // Parallel fingers — U
+      return { name: 'U', scoreAdjust: 1.5 };
+    }
+    if (indexMiddleDist >= 0.4) {
+      // Spread apart — this is actually V not U
+      return { name: 'U', scoreAdjust: 0.3 }; // Low score, let V win
     }
   }
 
   // --- V vs K ---
-  // Both have index and middle up. V = thumb curled, K = thumb between fingers
   if (['V', 'K'].includes(gestureName)) {
     const thumbTip = landmarks[4];
-    const indexMCP = landmarks[5];
-    const middleMCP = landmarks[9];
-    // K: thumb tip is between index and middle, touching middle finger
-    const thumbToMiddle = dist2D(thumbTip, landmarks[10]) / (palmSize || 0.001);
+    const thumbToMiddlePIP = dist2D(thumbTip, landmarks[10]) / (palmSize || 0.001);
     const thumbBetween = thumbPos.thumbBetweenFingers;
-    if (thumbToMiddle < 0.4 && thumbBetween < 0.5 && features.thumbExtended) {
-      return { name: 'K', scoreAdjust: 1.5 };
-    } else {
+
+    // K: thumb tip is between index and middle, touching middle
+    if (thumbToMiddlePIP < 0.35 && thumbBetween < 0.45 && features.thumbExtended) {
+      return { name: 'K', scoreAdjust: 2.0 };
+    }
+
+    // V: thumb curled, fingers spread
+    if (!features.thumbExtended && features.indexMiddleSpread > 0.25) {
+      return { name: 'V', scoreAdjust: 1.0 };
+    }
+
+    // Default: if fingers are spread it's V, if thumb is between it's K
+    if (features.indexMiddleSpread > 0.3) {
       return { name: 'V', scoreAdjust: 0.5 };
     }
   }
 
   // --- B vs Hello (open palm) ---
-  // B = flat hand with thumb tucked, Hello = open hand with thumb out
   if (gestureName === 'B') {
-    if (features.thumbExtended && features.fingerSpread > 0.25) {
-      return { name: '🖐 Hello', scoreAdjust: 1.0 }; // Matches commonSigns name
+    if (features.thumbExtended && features.fingerSpread > 0.22) {
+      return { name: '🖐 Hello', scoreAdjust: 1.5 };
     }
   }
 
   // --- D vs I (index up vs pinky up) ---
   if (['D', 'I'].includes(gestureName)) {
     if (features.pinkyExtended && !features.indexExtended) {
-      return { name: 'I', scoreAdjust: 1.5 };
+      return { name: 'I', scoreAdjust: 2.0 };
     }
     if (features.indexExtended && !features.pinkyExtended) {
+      return { name: 'D', scoreAdjust: 2.0 };
+    }
+  }
+
+  // --- D vs G (index vertical vs index horizontal) ---
+  if (['D', 'G'].includes(gestureName)) {
+    const absAngle = Math.abs(features.indexAngle);
+    // G: index is roughly horizontal (angle > 50 from vertical)
+    if (absAngle > 50) {
+      return { name: 'G', scoreAdjust: 1.5 };
+    }
+    // D: index is roughly vertical (angle < 35 from vertical)
+    if (absAngle < 35) {
       return { name: 'D', scoreAdjust: 1.5 };
     }
   }
 
+  // --- G vs Q (horizontal index vs downward index) ---
+  if (['G', 'Q'].includes(gestureName)) {
+    const indexTip = landmarks[8];
+    const indexMCP = landmarks[5];
+    // Q: index tip is BELOW index MCP (pointing down)
+    if (indexTip.y > indexMCP.y + 0.02) {
+      return { name: 'Q', scoreAdjust: 1.5 };
+    }
+    // G: index tip is roughly at same height or above MCP (horizontal)
+    if (indexTip.y <= indexMCP.y + 0.02) {
+      return { name: 'G', scoreAdjust: 1.5 };
+    }
+  }
+
+  // --- H vs P (two fingers horizontal vs two fingers pointing down) ---
+  if (['H', 'P'].includes(gestureName)) {
+    const indexTip = landmarks[8];
+    const middleTip = landmarks[12];
+    const indexMCP = landmarks[5];
+    const middleMCP = landmarks[9];
+    const avgTipY = (indexTip.y + middleTip.y) / 2;
+    const avgMCPY = (indexMCP.y + middleMCP.y) / 2;
+    // P: fingertips are below MCPs (pointing down)
+    if (avgTipY > avgMCPY + 0.03) {
+      return { name: 'P', scoreAdjust: 1.5 };
+    }
+    // H: fingertips are roughly at same height as MCPs (horizontal)
+    if (avgTipY <= avgMCPY + 0.03) {
+      return { name: 'H', scoreAdjust: 1.5 };
+    }
+  }
+
+  // --- H vs U/V (two fingers horizontal vs vertical) ---
+  if (gestureName === 'H') {
+    const absAngle = Math.abs(features.indexAngle);
+    // If index is roughly vertical, this is U or V, not H
+    if (absAngle < 30) {
+      if (features.indexMiddleSpread > 0.35) {
+        return { name: 'V', scoreAdjust: 1.0 };
+      }
+      return { name: 'U', scoreAdjust: 1.0 };
+    }
+  }
+
   // --- M vs N ---
-  // Both fists pointing down. M = 3 fingers over thumb, N = 2 fingers over thumb
   if (['M', 'N'].includes(gestureName)) {
-    // Check ring finger position - M has ring over thumb, N does not
     const ringTip = landmarks[16];
     const thumbTip = landmarks[4];
     const ringOverThumb = dist2D(ringTip, thumbTip) / (palmSize || 0.001);
-    if (ringOverThumb < 0.45) {
-      return { name: 'M', scoreAdjust: 1.0 };
-    } else {
-      return { name: 'N', scoreAdjust: 1.0 };
+    // M: ring finger is also draped over thumb (close to it)
+    if (ringOverThumb < 0.4) {
+      return { name: 'M', scoreAdjust: 1.5 };
+    }
+    // N: only index and middle over thumb, ring is curled away
+    return { name: 'N', scoreAdjust: 1.5 };
+  }
+
+  // --- I vs Y (pinky up: I has thumb curled, Y has thumb extended) ---
+  if (['I', 'Y'].includes(gestureName)) {
+    if (features.thumbExtended && features.pinkyExtended) {
+      return { name: 'Y', scoreAdjust: 2.0 };
+    }
+    if (!features.thumbExtended && features.pinkyExtended) {
+      return { name: 'I', scoreAdjust: 2.0 };
+    }
+  }
+
+  // --- L vs Y ---
+  // Both have thumb out. L = index up, Y = pinky up
+  if (['L', 'Y'].includes(gestureName)) {
+    if (features.indexExtended && !features.pinkyExtended) {
+      return { name: 'L', scoreAdjust: 1.5 };
+    }
+    if (features.pinkyExtended && !features.indexExtended) {
+      return { name: 'Y', scoreAdjust: 1.5 };
+    }
+  }
+
+  // --- C vs O ---
+  // C is more open, O is tighter with fingertips closer to thumb
+  if (['C', 'O'].includes(gestureName)) {
+    const thumbTip = landmarks[4];
+    const indexTip = landmarks[8];
+    const thumbToIndex = dist2D(thumbTip, indexTip) / (palmSize || 0.001);
+    // O: thumb and index tips are very close (forming closed circle)
+    if (thumbToIndex < 0.35) {
+      return { name: 'O', scoreAdjust: 1.5 };
+    }
+    // C: thumb and index are spread apart (open curve)
+    if (thumbToIndex >= 0.35) {
+      return { name: 'C', scoreAdjust: 1.5 };
+    }
+  }
+
+  // --- F vs D (both have index curled/touching, 3 fingers up) ---
+  if (['F', 'D'].includes(gestureName)) {
+    // F: middle, ring, pinky are UP; index is curled touching thumb
+    // D: only index is UP; middle, ring, pinky are curled
+    if (features.middleExtended && features.ringExtended && features.pinkyExtended) {
+      return { name: 'F', scoreAdjust: 1.5 };
+    }
+    if (features.indexExtended && !features.middleExtended) {
+      return { name: 'D', scoreAdjust: 1.5 };
+    }
+  }
+
+  // --- W vs B (3 fingers vs 4 fingers up) ---
+  if (['W', 'B'].includes(gestureName)) {
+    if (features.pinkyExtended && features.indexExtended &&
+        features.middleExtended && features.ringExtended) {
+      return { name: 'B', scoreAdjust: 1.0 };
+    }
+    if (!features.pinkyExtended && features.indexExtended &&
+        features.middleExtended && features.ringExtended) {
+      return { name: 'W', scoreAdjust: 1.5 };
+    }
+  }
+
+  // --- D vs ☝ You (Pointing) ---
+  // D: index up with thumb touching middle finger
+  // Pointing: just index up, thumb curled to side
+  if (gestureName === 'D' || gestureName === '☝ You') {
+    if (features.thumbTouchesMiddle || features.thumbTouchesMiddlePIP || features.thumbTouchesMiddleDIP) {
+      return { name: 'D', scoreAdjust: 1.0 };
+    }
+    // Just index pointing with no thumb-middle contact = Pointing
+    if (features.indexExtended && !features.middleExtended && !features.thumbTouchesMiddle) {
+      return { name: '☝ You', scoreAdjust: 0.5 };
     }
   }
 
@@ -411,16 +634,8 @@ export function disambiguate(gestureName, landmarks, features) {
 // Custom Gesture Definitions (beyond Fingerpose)
 // ==========================================
 
-/**
- * Each custom gesture has:
- * - name: display name
- * - test: function(features) => confidence (0-10) or null
- */
 const customGestures = [
   {
-    // THANK YOU: Flat hand touches chin then moves forward
-    // With face detection: hand near chin, open, palm out
-    // Without face: open hand, palm facing out, fingers together (fallback)
     name: 'Thank You',
     test(features, face) {
       const isOpenHand = features.handOpenness > 0.55 &&
@@ -430,26 +645,21 @@ const customGestures = [
 
       if (!isOpenHand) return null;
 
-      // With face data: check hand is near chin
       if (face && face.chin) {
         const handCenter = features.wrist;
         const chinDist = dist2D(handCenter, face.chin);
-        // Hand near chin area (within ~30% of frame height)
         if (chinDist < 0.25) {
-          return 9.5; // High confidence with body-relative
+          return 9.5;
         }
       }
 
-      // Fallback: open hand, palm out, fingers together
       if (features.palmFacing > 0.2) {
-        return 8.0;
+        return 7.5;
       }
       return null;
     },
   },
   {
-    // PLEASE: Flat hand on chest circling
-    // With face: hand below chin, palm toward body
     name: 'Please',
     test(features, face) {
       if (features.handOpenness < 0.5 || features.thumbTouchesIndex) return null;
@@ -457,23 +667,19 @@ const customGestures = [
 
       if (face && face.chin) {
         const handCenter = features.wrist;
-        // Hand should be below chin (chest area) and palm facing body
         const isBelowChin = handCenter.y > face.chin.y + 0.05;
         if (isBelowChin && features.palmFacing < 0) {
           return 9.0;
         }
       }
 
-      // Fallback
       if (features.palmFacing < -0.1) {
-        return 7.5;
+        return 7.0;
       }
       return null;
     },
   },
   {
-    // THINK: Index finger pointing to temple
-    // Requires face detection
     name: 'Think',
     test(features, face) {
       if (!face || !face.forehead) return null;
@@ -488,12 +694,9 @@ const customGestures = [
     },
   },
   {
-    // EAT: Fingers bunched to mouth
     name: 'Eat',
     test(features, face) {
       if (!face || !face.upperLip) return null;
-
-      // All fingertips bunched together (low spread) near mouth
       if (features.fingerSpread > 0.3) return null;
       const mouthDist = dist2D(features.indexTip, face.upperLip);
       if (mouthDist < 0.12 && features.handOpenness < 0.6) {
@@ -503,7 +706,6 @@ const customGestures = [
     },
   },
   {
-    // OK / FINE: Thumb and index form circle, other fingers up
     name: 'OK',
     test(features) {
       if (features.thumbTouchesIndex &&
@@ -517,21 +719,19 @@ const customGestures = [
     },
   },
   {
-    // PEACE / VICTORY: Index and middle up, spread apart
     name: 'Peace',
     test(features) {
       if (features.indexExtended &&
           features.middleExtended &&
           !features.ringExtended &&
           !features.pinkyExtended &&
-          features.fingerSpread > 0.3) {
+          features.indexMiddleSpread > 0.3) {
         return 8.5;
       }
       return null;
     },
   },
   {
-    // CALL ME: Thumb and pinky out (phone gesture)
     name: 'Call Me',
     test(features) {
       if (features.thumbExtended &&
@@ -549,7 +749,6 @@ const customGestures = [
     },
   },
   {
-    // ROCK ON: Index and pinky up, middle and ring curled
     name: 'Rock On',
     test(features) {
       if (features.indexExtended &&
@@ -562,7 +761,6 @@ const customGestures = [
     },
   },
   {
-    // GOOD/LIKE: Thumbs up
     name: 'Good',
     test(features) {
       if (features.thumbExtended &&
@@ -579,12 +777,6 @@ const customGestures = [
   },
 ];
 
-/**
- * Run all custom gesture detectors
- * @param {Array} landmarks - 21 MediaPipe hand landmarks
- * @param {Object|null} face - Face landmark data (chin, forehead, etc.)
- * @returns {Array<{name: string, score: number}>} Sorted by confidence
- */
 export function analyzeCustomGestures(landmarks, face) {
   const features = extractHandFeatures(landmarks);
   if (!features) return [];
@@ -601,14 +793,10 @@ export function analyzeCustomGestures(landmarks, face) {
   return results;
 }
 
-/**
- * Get all available custom gesture names (for the guide)
- */
 export function getCustomGestureNames() {
   return customGestures.map((g) => g.name);
 }
 
-// Reference data for the side menu (custom gestures beyond fingerpose)
 export const customSignsReference = [
   { letter: '🙏', name: 'Thank You', desc: 'Flat hand from chin forward', motion: true, bodyRelative: true },
   { letter: '🥺', name: 'Please', desc: 'Flat hand on chest', motion: false, bodyRelative: true },

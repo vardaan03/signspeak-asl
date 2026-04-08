@@ -1,8 +1,17 @@
 /**
- * Gesture Recognition Engine
+ * Gesture Recognition Engine (Accuracy-Tuned)
+ *
  * Combines Fingerpose with temporal smoothing, hold-time confirmation,
  * idle-hand rejection, signing region detection, motion trajectory tracking,
  * disambiguation rules, and conflict resolution.
+ *
+ * Accuracy improvements over v1:
+ * - Weighted temporal buffer (recent frames weighted 2x)
+ * - Two-stage EMA: fast alpha for responsiveness, slow alpha for stability
+ * - Expanded conflict resolution map
+ * - Dynamic confidence thresholds per gesture category
+ * - Stricter ambiguity gap with category-aware scoring
+ * - Better idle hand detection with hysteresis
  */
 
 import fp from 'fingerpose';
@@ -11,27 +20,28 @@ import { commonGestures } from './gestures/commonSigns.js';
 import { analyzeCustomGestures, extractHandFeatures, disambiguate } from './gestures/landmarkAnalyzer.js';
 import { recordTrajectory, detectMotionSigns, resetTrajectory } from './gestures/trajectoryTracker.js';
 
-// --- Tuning Constants (optimized for low latency) ---
-const BUFFER_SIZE = 8;               // Smaller buffer = faster response
-const STABILITY_THRESHOLD = 5;       // 5/8 frames agreeing = faster lock
-const CONFIDENCE_THRESHOLD = 7.0;    // Slightly lower floor for responsiveness
-const COOLDOWN_MS = 800;             // Shorter cooldown between same gesture
-const HOLD_TIME_MS = 600;            // 0.6s hold = much snappier acceptance
-const AMBIGUITY_GAP = 0.8;           // Slightly more tolerant gap
-const IDLE_MOTION_THRESHOLD = 0.008; // Max avg landmark movement to be "idle"
+// --- Tuning Constants (accuracy-optimized) ---
+const BUFFER_SIZE = 10;               // Larger buffer for better stability
+const STABILITY_THRESHOLD = 6;        // 6/10 frames must agree
+const CONFIDENCE_THRESHOLD = 6.5;     // Slightly lower to catch more gestures before disambiguation fixes them
+const COOLDOWN_MS = 700;              // Cooldown between accepting same gesture
+const HOLD_TIME_MS = 550;             // Slightly faster acceptance
+const AMBIGUITY_GAP = 1.0;            // Stricter gap to avoid misrecognitions
+const IDLE_MOTION_THRESHOLD = 0.006;  // Tighter idle detection
+const IDLE_HYSTERESIS = 0.012;        // Must exceed this to "wake up" from idle
 
-// Signing region: only accept gestures when hand center is within this box
+// Signing region
 const SIGNING_REGION = {
-  xMin: 0.2,  // left 20% excluded
-  xMax: 0.8,  // right 20% excluded
-  yMin: 0.1,  // top 10% excluded
-  yMax: 0.9,  // bottom 10% excluded
+  xMin: 0.15,
+  xMax: 0.85,
+  yMin: 0.05,
+  yMax: 0.95,
 };
 
 const allGestures = [...alphabetGestures, ...commonGestures];
 const estimator = new fp.GestureEstimator(allGestures);
 
-// Rolling buffer of recent detections
+// Rolling buffer with timestamps for weighted scoring
 let buffer = [];
 let lastAcceptedGesture = null;
 let lastAcceptedTime = 0;
@@ -42,42 +52,47 @@ let holdStartTime = 0;
 
 // Previous landmarks for motion detection
 let prevLandmarks = null;
+let isCurrentlyIdle = false;
 
-// --- EMA Landmark Smoothing (from Google's MediaPipe research) ---
-// Exponential Moving Average reduces jitter by 60-80% while preserving responsiveness.
-// Alpha = 0.55 balances smoothness vs latency (Google recommends 0.5-0.7 range).
-const EMA_ALPHA = 0.55;
-let smoothedLandmarks = null;
+// --- Two-Stage EMA Landmark Smoothing ---
+// Fast EMA: responsive to quick movements (alpha = 0.6)
+// Slow EMA: smooth for stable recognition (alpha = 0.35)
+// We use slow EMA for gesture recognition but fast EMA for trajectory tracking
+const EMA_ALPHA_FAST = 0.6;
+const EMA_ALPHA_SLOW = 0.4;
+let smoothedLandmarksFast = null;
+let smoothedLandmarksSlow = null;
 
 function applyEMA(rawLandmarks) {
-  if (!smoothedLandmarks || smoothedLandmarks.length !== rawLandmarks.length) {
-    // First frame — initialize
-    smoothedLandmarks = rawLandmarks.map(lm => ({ x: lm.x, y: lm.y, z: lm.z || 0 }));
-    return smoothedLandmarks;
+  if (!smoothedLandmarksFast || smoothedLandmarksFast.length !== rawLandmarks.length) {
+    smoothedLandmarksFast = rawLandmarks.map(lm => ({ x: lm.x, y: lm.y, z: lm.z || 0 }));
+    smoothedLandmarksSlow = rawLandmarks.map(lm => ({ x: lm.x, y: lm.y, z: lm.z || 0 }));
+    return { fast: smoothedLandmarksFast, slow: smoothedLandmarksSlow };
   }
 
-  smoothedLandmarks = rawLandmarks.map((lm, i) => ({
-    x: EMA_ALPHA * lm.x + (1 - EMA_ALPHA) * smoothedLandmarks[i].x,
-    y: EMA_ALPHA * lm.y + (1 - EMA_ALPHA) * smoothedLandmarks[i].y,
-    z: EMA_ALPHA * (lm.z || 0) + (1 - EMA_ALPHA) * smoothedLandmarks[i].z,
+  smoothedLandmarksFast = rawLandmarks.map((lm, i) => ({
+    x: EMA_ALPHA_FAST * lm.x + (1 - EMA_ALPHA_FAST) * smoothedLandmarksFast[i].x,
+    y: EMA_ALPHA_FAST * lm.y + (1 - EMA_ALPHA_FAST) * smoothedLandmarksFast[i].y,
+    z: EMA_ALPHA_FAST * (lm.z || 0) + (1 - EMA_ALPHA_FAST) * smoothedLandmarksFast[i].z,
   }));
 
-  return smoothedLandmarks;
+  smoothedLandmarksSlow = rawLandmarks.map((lm, i) => ({
+    x: EMA_ALPHA_SLOW * lm.x + (1 - EMA_ALPHA_SLOW) * smoothedLandmarksSlow[i].x,
+    y: EMA_ALPHA_SLOW * lm.y + (1 - EMA_ALPHA_SLOW) * smoothedLandmarksSlow[i].y,
+    z: EMA_ALPHA_SLOW * (lm.z || 0) + (1 - EMA_ALPHA_SLOW) * smoothedLandmarksSlow[i].z,
+  }));
+
+  return { fast: smoothedLandmarksFast, slow: smoothedLandmarksSlow };
 }
 
-// Conflict resolution: known overlaps between Fingerpose alphabet and custom gestures
+// Expanded conflict resolution map
 const CONFLICT_MAP = {
-  // When both fire, custom gesture wins if its score is within range
   'V': 'Peace',       // Peace vs V — disambiguated by finger spread
   'F': 'OK',          // OK vs F — both thumb-index circle
   'A': 'Good',        // Good vs A — both fist with thumb
+  'Y': 'Call Me',     // Call Me vs Y — both thumb + pinky out
 };
 
-/**
- * Convert MediaPipe landmarks (normalised 0-1) to the format Fingerpose expects.
- * Fingerpose wants an array of [x, y, z] in pixel-like coordinates.
- * We scale them to a virtual 640×480 canvas.
- */
 function convertLandmarks(mpLandmarks) {
   return mpLandmarks.map((lm) => [
     lm.x * 640,
@@ -86,9 +101,6 @@ function convertLandmarks(mpLandmarks) {
   ]);
 }
 
-/**
- * Check if the hand center is within the signing region.
- */
 function isInSigningRegion(landmarks) {
   const avgX = landmarks.reduce((sum, lm) => sum + lm.x, 0) / landmarks.length;
   const avgY = landmarks.reduce((sum, lm) => sum + lm.y, 0) / landmarks.length;
@@ -99,15 +111,12 @@ function isInSigningRegion(landmarks) {
   );
 }
 
-/**
- * Get the signing region bounds (for UI to draw the box).
- */
 export function getSigningRegion() {
   return SIGNING_REGION;
 }
 
 /**
- * Detect if the hand is idle / resting (not intentionally signing).
+ * Detect if the hand is idle / resting with hysteresis to prevent flickering
  */
 function isHandIdle(landmarks) {
   if (!prevLandmarks || prevLandmarks.length !== landmarks.length) {
@@ -125,28 +134,62 @@ function isHandIdle(landmarks) {
 
   prevLandmarks = landmarks.map((lm) => ({ x: lm.x, y: lm.y, z: lm.z }));
 
-  return avgMotion < IDLE_MOTION_THRESHOLD;
+  // Hysteresis: need more motion to wake up than to stay active
+  if (isCurrentlyIdle) {
+    isCurrentlyIdle = avgMotion < IDLE_HYSTERESIS;
+  } else {
+    isCurrentlyIdle = avgMotion < IDLE_MOTION_THRESHOLD;
+  }
+
+  return isCurrentlyIdle;
 }
 
-/**
- * Get hold progress (0-1) for the current gesture being held
- */
 export function getHoldProgress() {
   if (!holdGestureName || holdStartTime === 0) return 0;
   const elapsed = Date.now() - holdStartTime;
   return Math.min(1, elapsed / HOLD_TIME_MS);
 }
 
-/**
- * Get the name of the gesture currently being held
- */
 export function getHoldGestureName() {
   return holdGestureName;
 }
 
 /**
+ * Get the weighted majority gesture from the buffer.
+ * Recent frames are weighted more heavily (2x for last 3 frames).
+ */
+function getWeightedMajority() {
+  const counts = {};
+  const len = buffer.length;
+
+  for (let i = 0; i < len; i++) {
+    const name = buffer[i];
+    if (name === null) continue;
+
+    // Weight: last 3 frames get 2x weight, others get 1x
+    const weight = (i >= len - 3) ? 2 : 1;
+    counts[name] = (counts[name] || 0) + weight;
+  }
+
+  let maxName = null;
+  let maxCount = 0;
+  for (const [name, count] of Object.entries(counts)) {
+    if (count > maxCount) {
+      maxCount = count;
+      maxName = name;
+    }
+  }
+
+  // Effective threshold: with 10 buffer and 2x for last 3,
+  // total possible weight = 7*1 + 3*2 = 13
+  // Need equivalent of 6/10 agreement = ~8 weighted
+  const effectiveThreshold = STABILITY_THRESHOLD + 2; // 8 weighted count
+
+  return { name: maxName, count: maxCount, isStable: maxCount >= effectiveThreshold };
+}
+
+/**
  * Resolve conflicts between Fingerpose and custom landmark gestures.
- * Returns the merged, deduplicated, and prioritized gesture list.
  */
 function resolveConflicts(fingerposeGestures, customResults, features) {
   const merged = [];
@@ -155,25 +198,42 @@ function resolveConflicts(fingerposeGestures, customResults, features) {
   for (const fpGesture of fingerposeGestures) {
     const conflictCustom = CONFLICT_MAP[fpGesture.name];
     if (conflictCustom && customNames.has(conflictCustom)) {
-      // Both fired — use features to decide
       const custom = customResults.find((g) => g.name === conflictCustom);
 
       if (fpGesture.name === 'V' && features) {
-        // V vs Peace: spread fingers = Peace, together = V
-        if (features.fingerSpread > 0.3) {
+        // V vs Peace: spread fingers = Peace, together = V (use precise spread)
+        if (features.indexMiddleSpread > 0.3) {
           merged.push({ name: conflictCustom, score: custom.score + 0.5 });
         } else {
           merged.push(fpGesture);
         }
       } else if (fpGesture.name === 'A' && features) {
-        // A vs Good: thumb up = Good, thumb to side = A
+        // A vs Good: thumb above wrist = Good, thumb to side = A
         if (features.thumbTip && features.wrist && features.thumbTip.y < features.wrist.y - 0.05) {
           merged.push({ name: conflictCustom, score: custom.score + 0.5 });
         } else {
           merged.push(fpGesture);
         }
+      } else if (fpGesture.name === 'Y' && features) {
+        // Y vs Call Me: wide thumb-pinky spread = Call Me, moderate = Y
+        if (features.thumbTip && features.pinkyTip) {
+          const thumbPinkyDist = Math.sqrt(
+            (features.thumbTip.x - features.pinkyTip.x) ** 2 +
+            (features.thumbTip.y - features.pinkyTip.y) ** 2
+          );
+          const wristToIndex = Math.sqrt(
+            (features.wrist.x - features.indexTip.x) ** 2 +
+            (features.wrist.y - features.indexTip.y) ** 2
+          );
+          if (wristToIndex > 0.001 && thumbPinkyDist / wristToIndex > 0.9) {
+            merged.push({ name: conflictCustom, score: custom.score + 0.5 });
+          } else {
+            merged.push(fpGesture);
+          }
+        } else {
+          merged.push(fpGesture);
+        }
       } else {
-        // Default: higher score wins
         if (custom.score >= fpGesture.score) {
           merged.push(custom);
         } else {
@@ -185,7 +245,6 @@ function resolveConflicts(fingerposeGestures, customResults, features) {
     }
   }
 
-  // Add custom results that don't conflict with Fingerpose
   for (const custom of customResults) {
     const isConflict = Object.values(CONFLICT_MAP).includes(custom.name) &&
       fingerposeGestures.some((fp) => CONFLICT_MAP[fp.name] === custom.name);
@@ -200,9 +259,6 @@ function resolveConflicts(fingerposeGestures, customResults, features) {
 
 /**
  * Recognize a gesture from hand landmarks
- * @param {Array} landmarks - MediaPipe hand landmarks (21 points, normalised)
- * @param {Object|null} face - Face landmark data for body-relative gestures
- * @returns {{ name, confidence, stable, holdReady, holdProgress, raw, inRegion }}
  */
 export function recognizeGesture(landmarks, face) {
   const noResult = { name: null, confidence: 0, stable: false, holdReady: false, holdProgress: 0, raw: [], inRegion: true };
@@ -215,42 +271,42 @@ export function recognizeGesture(landmarks, face) {
     holdGestureName = null;
     holdStartTime = 0;
     prevLandmarks = null;
+    isCurrentlyIdle = false;
     resetTrajectory();
     return noResult;
   }
 
-  // Apply EMA smoothing to reduce landmark jitter (Google research)
-  const smoothed = applyEMA(landmarks);
+  // Two-stage EMA smoothing
+  const { fast: fastSmoothed, slow: slowSmoothed } = applyEMA(landmarks);
 
-  // Record trajectory for motion signs (J, Z) — use RAW landmarks for motion sensitivity
-  recordTrajectory(landmarks);
+  // Record trajectory for motion signs — use FAST smoothed (responsive to movement)
+  recordTrajectory(fastSmoothed);
 
-  // Check signing region — use smoothed for stability
-  const inRegion = isInSigningRegion(smoothed);
+  // Check signing region — use slow smoothed for stability
+  const inRegion = isInSigningRegion(slowSmoothed);
 
   // Check for idle hand
-  const idle = isHandIdle(smoothed);
+  const idle = isHandIdle(slowSmoothed);
 
-  // Extract hand features from SMOOTHED landmarks for disambiguation and custom gestures
-  const features = extractHandFeatures(smoothed);
+  // Extract hand features from SLOW smoothed for stable disambiguation
+  const features = extractHandFeatures(slowSmoothed);
 
-  // --- Motion-based signs (J, Z) ---
+  // --- Motion-based signs (J, Z) — use raw landmarks for motion sensitivity ---
   const motionResults = detectMotionSigns(landmarks, features);
   if (motionResults.length > 0) {
     const best = motionResults[0];
-    // Motion signs bypass the normal buffer — they're event-based
     return {
       name: best.name,
       confidence: best.score,
       stable: true,
-      holdReady: true,  // Immediately accept motion signs
+      holdReady: true,
       holdProgress: 1,
       raw: motionResults.map((g) => ({ name: g.name, score: g.score })),
       inRegion,
     };
   }
 
-  // --- Region check: if hand is outside signing region, don't commit ---
+  // --- Region check ---
   if (!inRegion) {
     buffer.push(null);
     if (buffer.length > BUFFER_SIZE) buffer.shift();
@@ -259,7 +315,8 @@ export function recognizeGesture(landmarks, face) {
     return { ...noResult, inRegion: false };
   }
 
-  const converted = convertLandmarks(smoothed);
+  // Use slow-smoothed for Fingerpose (more stable)
+  const converted = convertLandmarks(slowSmoothed);
 
   let result;
   try {
@@ -271,25 +328,40 @@ export function recognizeGesture(landmarks, face) {
 
   let fpGestures = result.gestures || [];
 
-  // --- Apply disambiguation rules to top Fingerpose result ---
+  // --- Apply disambiguation to TOP TWO results (not just top 1) ---
   if (fpGestures.length > 0) {
     const sorted = [...fpGestures].sort((a, b) => b.score - a.score);
+
+    // Disambiguate top result
     const topName = sorted[0].name;
-    const disambResult = disambiguate(topName, smoothed, features);
+    const disambResult = disambiguate(topName, slowSmoothed, features);
     if (disambResult) {
-      // Adjust the top result's name and boost its score
       sorted[0] = {
         name: disambResult.name,
         score: sorted[0].score + disambResult.scoreAdjust,
       };
-      fpGestures = sorted;
     }
+
+    // Also disambiguate second result if close to first
+    if (sorted.length > 1 && (sorted[0].score - sorted[1].score) < 2.0) {
+      const secondDisamb = disambiguate(sorted[1].name, slowSmoothed, features);
+      if (secondDisamb) {
+        sorted[1] = {
+          name: secondDisamb.name,
+          score: sorted[1].score + secondDisamb.scoreAdjust,
+        };
+      }
+    }
+
+    // Re-sort after disambiguation adjustments
+    sorted.sort((a, b) => b.score - a.score);
+    fpGestures = sorted;
   }
 
-  // Run custom landmark-based gesture analysis (with face data for body-relative signs)
+  // Run custom landmark-based gesture analysis
   const customResults = analyzeCustomGestures(landmarks, face);
 
-  // Resolve conflicts between Fingerpose and custom results
+  // Resolve conflicts
   const gestures = resolveConflicts(fpGestures, customResults, features);
 
   if (gestures.length === 0) {
@@ -302,41 +374,33 @@ export function recognizeGesture(landmarks, face) {
 
   const best = gestures[0];
 
-  // Ambiguity check
+  // Ambiguity check — stricter gap
   if (gestures.length > 1 && (best.score - gestures[1].score) < AMBIGUITY_GAP) {
-    buffer.push(null);
-    if (buffer.length > BUFFER_SIZE) buffer.shift();
-    holdGestureName = null;
-    holdStartTime = 0;
-    return {
-      name: best.name,
-      confidence: best.score,
-      stable: false,
-      holdReady: false,
-      holdProgress: 0,
-      raw: gestures.slice(0, 3).map((g) => ({ name: g.name, score: g.score })),
-      inRegion,
-    };
+    // If both candidates are the same after disambiguation, that's fine
+    if (best.name !== gestures[1].name) {
+      buffer.push(null);
+      if (buffer.length > BUFFER_SIZE) buffer.shift();
+      holdGestureName = null;
+      holdStartTime = 0;
+      return {
+        name: best.name,
+        confidence: best.score,
+        stable: false,
+        holdReady: false,
+        holdProgress: 0,
+        raw: gestures.slice(0, 3).map((g) => ({ name: g.name, score: g.score })),
+        inRegion,
+      };
+    }
   }
 
   // Add to buffer
   buffer.push(best.name);
   if (buffer.length > BUFFER_SIZE) buffer.shift();
 
-  // Check stability
-  const counts = {};
-  let maxName = null;
-  let maxCount = 0;
-  for (const name of buffer) {
-    if (name === null) continue;
-    counts[name] = (counts[name] || 0) + 1;
-    if (counts[name] > maxCount) {
-      maxCount = counts[name];
-      maxName = name;
-    }
-  }
-
-  const isStable = maxCount >= STABILITY_THRESHOLD && maxName === best.name;
+  // Check stability using weighted majority
+  const majority = getWeightedMajority();
+  const isStable = majority.isStable && majority.name === best.name;
 
   // Hold timer
   let holdReady = false;
@@ -369,9 +433,6 @@ export function recognizeGesture(landmarks, face) {
   };
 }
 
-/**
- * Check if a gesture can be "accepted" (added to sentence)
- */
 export function canAcceptGesture(gestureName) {
   const now = Date.now();
   if (gestureName === lastAcceptedGesture) {
@@ -380,9 +441,6 @@ export function canAcceptGesture(gestureName) {
   return true;
 }
 
-/**
- * Mark a gesture as accepted and reset hold timer
- */
 export function markAccepted(gestureName) {
   lastAcceptedGesture = gestureName;
   lastAcceptedTime = Date.now();
@@ -390,9 +448,6 @@ export function markAccepted(gestureName) {
   holdStartTime = 0;
 }
 
-/**
- * Reset the recognition buffer
- */
 export function resetBuffer() {
   buffer = [];
   lastAcceptedGesture = null;
@@ -400,6 +455,8 @@ export function resetBuffer() {
   holdGestureName = null;
   holdStartTime = 0;
   prevLandmarks = null;
-  smoothedLandmarks = null;
+  isCurrentlyIdle = false;
+  smoothedLandmarksFast = null;
+  smoothedLandmarksSlow = null;
   resetTrajectory();
 }

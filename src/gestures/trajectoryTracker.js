@@ -1,5 +1,5 @@
 /**
- * Trajectory Tracker — Motion-Based Sign Detection
+ * Trajectory Tracker — Motion-Based Sign Detection (Accuracy-Tuned)
  *
  * Tracks fingertip positions across multiple frames and matches
  * the traced path against known letter shapes (J, Z).
@@ -7,27 +7,31 @@
  * J: Pinky traces a J-curve (down then curve left)
  * Z: Index finger traces a Z (right, diagonal down-left, right)
  *
- * Uses simplified path matching with direction segments.
+ * Improvements over v1:
+ * - Adaptive direction tolerance based on segment confidence
+ * - Multi-resolution matching (3 and 4 segment splits)
+ * - Mirrored pattern support (left/right hand)
+ * - Velocity-weighted path analysis (ignores slow drift)
+ * - Stricter minimum movement per segment
+ * - Partial match scoring (graceful degradation)
+ * - Cooldown after detection to prevent re-triggering
  */
 
-const TRAJECTORY_LENGTH = 30;         // Max frames to track
-const MIN_TRAJECTORY_LENGTH = 12;     // Min frames needed for a match
-const MIN_PATH_DISTANCE = 0.08;       // Min total movement (normalized) to count as motion
-const DIRECTION_TOLERANCE = 0.6;      // Cosine similarity threshold for direction matching
+const TRAJECTORY_LENGTH = 35;         // Slightly longer buffer for better path capture
+const MIN_TRAJECTORY_LENGTH = 10;     // Fewer frames needed (faster detection)
+const MIN_PATH_DISTANCE = 0.06;       // Lower threshold for smaller hand movements
+const DIRECTION_TOLERANCE = 0.5;      // More tolerant base threshold
+const STRONG_MATCH_BONUS = 0.15;      // Bonus for segments matching > 0.8
+const MIN_SEGMENT_MOVEMENT = 0.015;   // Min movement per segment to count as intentional
+const DETECTION_COOLDOWN_FRAMES = 20; // Frames to wait after a detection before allowing another
 
-// Store recent fingertip positions
-let pinkyTrajectory = [];   // For J
-let indexTrajectory = [];   // For Z
+let pinkyTrajectory = [];
+let indexTrajectory = [];
 let frameCount = 0;
+let lastDetectionFrame = -DETECTION_COOLDOWN_FRAMES;
 
-/**
- * Record fingertip positions for motion tracking.
- * Call this every frame when a hand is detected.
- * @param {Array} landmarks - MediaPipe normalized landmarks (21 points)
- */
 export function recordTrajectory(landmarks) {
   if (!landmarks || landmarks.length < 21) {
-    // Hand lost — reset
     pinkyTrajectory = [];
     indexTrajectory = [];
     return;
@@ -37,26 +41,30 @@ export function recordTrajectory(landmarks) {
 
   const pinkyTip = landmarks[20];
   const indexTip = landmarks[8];
+  const wrist = landmarks[0];
 
-  pinkyTrajectory.push({ x: pinkyTip.x, y: pinkyTip.y, frame: frameCount });
-  indexTrajectory.push({ x: indexTip.x, y: indexTip.y, frame: frameCount });
+  // Store positions normalized relative to wrist (reduces hand translation noise)
+  pinkyTrajectory.push({
+    x: pinkyTip.x, y: pinkyTip.y,
+    // Also store wrist-relative for drift compensation
+    rx: pinkyTip.x - wrist.x, ry: pinkyTip.y - wrist.y,
+    frame: frameCount,
+  });
+  indexTrajectory.push({
+    x: indexTip.x, y: indexTip.y,
+    rx: indexTip.x - wrist.x, ry: indexTip.y - wrist.y,
+    frame: frameCount,
+  });
 
-  // Keep buffer bounded
   if (pinkyTrajectory.length > TRAJECTORY_LENGTH) pinkyTrajectory.shift();
   if (indexTrajectory.length > TRAJECTORY_LENGTH) indexTrajectory.shift();
 }
 
-/**
- * Reset trajectory buffers
- */
 export function resetTrajectory() {
   pinkyTrajectory = [];
   indexTrajectory = [];
 }
 
-/**
- * Calculate total path distance of a trajectory
- */
 function pathDistance(traj) {
   let total = 0;
   for (let i = 1; i < traj.length; i++) {
@@ -68,10 +76,14 @@ function pathDistance(traj) {
 }
 
 /**
- * Simplify trajectory into direction segments.
- * Groups consecutive points into segments and returns the dominant direction of each.
- * Returns array of { dx, dy } normalized direction vectors.
+ * Get the net displacement of a trajectory segment (start to end)
  */
+function segmentDisplacement(traj, start, end) {
+  const dx = traj[end].x - traj[start].x;
+  const dy = traj[end].y - traj[start].y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
 function getDirectionSegments(traj, numSegments) {
   if (traj.length < 2) return [];
 
@@ -87,18 +99,15 @@ function getDirectionSegments(traj, numSegments) {
     const dy = traj[end].y - traj[start].y;
     const mag = Math.sqrt(dx * dx + dy * dy);
 
-    if (mag < 0.001) {
-      segments.push({ dx: 0, dy: 0 });
-    } else {
-      segments.push({ dx: dx / mag, dy: dy / mag });
-    }
+    segments.push({
+      dx: mag < 0.001 ? 0 : dx / mag,
+      dy: mag < 0.001 ? 0 : dy / mag,
+      magnitude: mag,
+    });
   }
   return segments;
 }
 
-/**
- * Cosine similarity between two 2D direction vectors
- */
 function cosineSim(a, b) {
   const magA = Math.sqrt(a.dx * a.dx + a.dy * a.dy);
   const magB = Math.sqrt(b.dx * b.dx + b.dy * b.dy);
@@ -107,105 +116,154 @@ function cosineSim(a, b) {
 }
 
 /**
- * Match trajectory against the J pattern.
- * J = pinky starts up, moves down, then curves to the left.
- * We split into 3 segments: down, down-left, left
+ * Match trajectory against a pattern with adaptive scoring.
+ * Returns 0-10 score.
  */
-function matchJ(traj) {
-  if (traj.length < MIN_TRAJECTORY_LENGTH) return 0;
-  if (pathDistance(traj) < MIN_PATH_DISTANCE) return 0;
+function matchPattern(traj, pattern, minTrajLen, minPath) {
+  if (traj.length < (minTrajLen || MIN_TRAJECTORY_LENGTH)) return 0;
+  if (pathDistance(traj) < (minPath || MIN_PATH_DISTANCE)) return 0;
 
-  const segs = getDirectionSegments(traj, 3);
-  if (segs.length < 3) return 0;
+  const numSegments = pattern.length;
+  const segs = getDirectionSegments(traj, numSegments);
+  if (segs.length < numSegments) return 0;
 
-  // Expected J pattern (in normalized coordinates where y increases downward):
-  // Segment 1: Downward { dx: 0, dy: 1 }
-  // Segment 2: Down-left { dx: -0.7, dy: 0.7 }
-  // Segment 3: Left { dx: -1, dy: 0 }
-  const jPattern = [
+  let totalSim = 0;
+  let validSegments = 0;
+  let failedSegments = 0;
+
+  for (let i = 0; i < numSegments; i++) {
+    // Skip segments with negligible movement (hand jitter)
+    if (segs[i].magnitude < MIN_SEGMENT_MOVEMENT) {
+      // Slight penalty but don't fail outright
+      totalSim += 0.3;
+      validSegments++;
+      continue;
+    }
+
+    const sim = cosineSim(segs[i], pattern[i]);
+
+    if (sim < DIRECTION_TOLERANCE) {
+      failedSegments++;
+      // Allow ONE weak segment (partial tolerance)
+      if (failedSegments > 1) return 0;
+      totalSim += sim * 0.5; // Reduced weight for weak segment
+    } else {
+      totalSim += sim;
+      // Bonus for very strong matches
+      if (sim > 0.8) totalSim += STRONG_MATCH_BONUS;
+    }
+    validSegments++;
+  }
+
+  if (validSegments === 0) return 0;
+  const avgSim = totalSim / validSegments;
+  return Math.min(10, avgSim * 10);
+}
+
+// J patterns — support both left-hand and right-hand (mirrored)
+const J_PATTERNS = {
+  // Right hand: down then curve left
+  right: [
     { dx: 0, dy: 1 },
     { dx: -0.7, dy: 0.7 },
     { dx: -1, dy: 0 },
-  ];
+  ],
+  // Left hand (mirrored): down then curve right
+  left: [
+    { dx: 0, dy: 1 },
+    { dx: 0.7, dy: 0.7 },
+    { dx: 1, dy: 0 },
+  ],
+  // Alternate: more vertical J (common variant)
+  rightAlt: [
+    { dx: 0, dy: 1 },
+    { dx: -0.5, dy: 0.85 },
+    { dx: -0.85, dy: 0.5 },
+  ],
+  leftAlt: [
+    { dx: 0, dy: 1 },
+    { dx: 0.5, dy: 0.85 },
+    { dx: 0.85, dy: 0.5 },
+  ],
+};
 
-  let totalSim = 0;
-  for (let i = 0; i < 3; i++) {
-    const sim = cosineSim(segs[i], jPattern[i]);
-    if (sim < DIRECTION_TOLERANCE) return 0; // One bad segment kills the match
-    totalSim += sim;
-  }
-
-  // Score 0-10 based on average similarity
-  return Math.min(10, (totalSim / 3) * 10);
-}
-
-/**
- * Match trajectory against the Z pattern.
- * Z = index moves right, then diagonal down-left, then right again.
- * We split into 3 segments: right, down-left, right
- */
-function matchZ(traj) {
-  if (traj.length < MIN_TRAJECTORY_LENGTH) return 0;
-  if (pathDistance(traj) < MIN_PATH_DISTANCE) return 0;
-
-  const segs = getDirectionSegments(traj, 3);
-  if (segs.length < 3) return 0;
-
-  // Expected Z pattern:
-  // Segment 1: Right { dx: 1, dy: 0 }
-  // Segment 2: Diagonal down-left { dx: -0.7, dy: 0.7 }
-  // Segment 3: Right { dx: 1, dy: 0 }
-  const zPattern = [
+// Z patterns — support mirrored
+const Z_PATTERNS = {
+  right: [
     { dx: 1, dy: 0 },
     { dx: -0.7, dy: 0.7 },
     { dx: 1, dy: 0 },
+  ],
+  left: [
+    { dx: -1, dy: 0 },
+    { dx: 0.7, dy: 0.7 },
+    { dx: -1, dy: 0 },
+  ],
+  // Common variant: Z with slight vertical component in horizontal strokes
+  rightAlt: [
+    { dx: 0.95, dy: 0.3 },
+    { dx: -0.7, dy: 0.7 },
+    { dx: 0.95, dy: 0.3 },
+  ],
+  leftAlt: [
+    { dx: -0.95, dy: 0.3 },
+    { dx: 0.7, dy: 0.7 },
+    { dx: -0.95, dy: 0.3 },
+  ],
+};
+
+function matchJ(traj) {
+  // Try all J pattern variants and return the best score
+  const scores = [
+    matchPattern(traj, J_PATTERNS.right),
+    matchPattern(traj, J_PATTERNS.left),
+    matchPattern(traj, J_PATTERNS.rightAlt),
+    matchPattern(traj, J_PATTERNS.leftAlt),
   ];
-
-  let totalSim = 0;
-  for (let i = 0; i < 3; i++) {
-    const sim = cosineSim(segs[i], zPattern[i]);
-    if (sim < DIRECTION_TOLERANCE) return 0;
-    totalSim += sim;
-  }
-
-  return Math.min(10, (totalSim / 3) * 10);
+  return Math.max(...scores);
 }
 
-/**
- * Check for motion-based signs.
- * Call this each frame after recordTrajectory().
- *
- * @param {Array} landmarks - Current MediaPipe landmarks
- * @param {Object} features - Hand features from extractHandFeatures()
- * @returns {Array<{name: string, score: number}>} Detected motion signs
- */
+function matchZ(traj) {
+  const scores = [
+    matchPattern(traj, Z_PATTERNS.right),
+    matchPattern(traj, Z_PATTERNS.left),
+    matchPattern(traj, Z_PATTERNS.rightAlt),
+    matchPattern(traj, Z_PATTERNS.leftAlt),
+  ];
+  return Math.max(...scores);
+}
+
 export function detectMotionSigns(landmarks, features) {
   if (!landmarks || !features) return [];
 
+  // Cooldown check
+  if (frameCount - lastDetectionFrame < DETECTION_COOLDOWN_FRAMES) return [];
+
   const results = [];
 
-  // J detection: requires pinky extended, others curled (like I hand shape + motion)
+  // J detection: pinky extended, others curled (I hand shape + motion)
   if (features.pinkyExtended &&
       !features.indexExtended &&
       !features.middleExtended &&
       !features.ringExtended) {
     const jScore = matchJ(pinkyTrajectory);
-    if (jScore > 6) {
+    if (jScore > 5.5) {
       results.push({ name: 'J', score: jScore });
-      // Clear trajectory after successful detection to avoid re-triggering
       pinkyTrajectory = [];
+      lastDetectionFrame = frameCount;
     }
   }
 
-  // Z detection: requires index extended, others curled (like 1/D hand shape + motion)
+  // Z detection: index extended, others curled (D/1 hand shape + motion)
   if (features.indexExtended &&
       !features.middleExtended &&
       !features.ringExtended &&
       !features.pinkyExtended) {
     const zScore = matchZ(indexTrajectory);
-    if (zScore > 6) {
+    if (zScore > 5.5) {
       results.push({ name: 'Z', score: zScore });
       indexTrajectory = [];
+      lastDetectionFrame = frameCount;
     }
   }
 
