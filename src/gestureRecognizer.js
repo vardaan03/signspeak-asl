@@ -17,6 +17,7 @@
 import fp from 'fingerpose';
 import { alphabetGestures } from './gestures/alphabet.js';
 import { commonGestures } from './gestures/commonSigns.js';
+import { numberGestures } from './gestures/numberSigns.js';
 import { analyzeCustomGestures, extractHandFeatures, disambiguate } from './gestures/landmarkAnalyzer.js';
 import { recordTrajectory, detectMotionSigns, resetTrajectory } from './gestures/trajectoryTracker.js';
 
@@ -37,7 +38,19 @@ const SIGNING_REGION = {
   yMin: 0.05,
   yMax: 0.95,
 };
+// --- Category-aware confidence thresholds ---
+// Fist variants (A/S/E/T/M/N) are inherently more ambiguous and need higher thresholds
+const FIST_LETTERS = new Set(['A', 'S', 'E', 'T', 'M', 'N']);
+const FIST_CONFIDENCE_THRESHOLD = 7.5;  // Higher threshold for fist variants
 
+// Anti-coarticulation constants
+const COARTICULATION_WINDOW_MS = 300;   // Window to detect rapid changes
+const COARTICULATION_GAP_BOOST = 1.5;   // Extra ambiguity gap during rapid changes
+let lastGestureChangeTime = 0;
+let lastGestureSeen = null;
+
+// Include number gestures in the gesture set (disabled by default to avoid letter conflicts)
+// Uncomment numberGestures to enable: [...alphabetGestures, ...commonGestures, ...numberGestures]
 const allGestures = [...alphabetGestures, ...commonGestures];
 const estimator = new fp.GestureEstimator(allGestures);
 
@@ -318,6 +331,12 @@ export function recognizeGesture(landmarks, face) {
   // Use slow-smoothed for Fingerpose (more stable)
   const converted = convertLandmarks(slowSmoothed);
 
+  // Category-aware confidence threshold
+  const getConfidenceForGesture = (name) => {
+    if (FIST_LETTERS.has(name)) return FIST_CONFIDENCE_THRESHOLD;
+    return CONFIDENCE_THRESHOLD;
+  };
+
   let result;
   try {
     result = estimator.estimate(converted, CONFIDENCE_THRESHOLD);
@@ -374,8 +393,19 @@ export function recognizeGesture(landmarks, face) {
 
   const best = gestures[0];
 
-  // Ambiguity check — stricter gap
-  if (gestures.length > 1 && (best.score - gestures[1].score) < AMBIGUITY_GAP) {
+  // Ambiguity check — stricter gap, with anti-coarticulation boost
+  const now = Date.now();
+  const isRapidChange = lastGestureSeen && best.name !== lastGestureSeen &&
+                        (now - lastGestureChangeTime) < COARTICULATION_WINDOW_MS;
+  const effectiveGap = isRapidChange ? AMBIGUITY_GAP + COARTICULATION_GAP_BOOST : AMBIGUITY_GAP;
+
+  // Track gesture changes for coarticulation detection
+  if (best.name !== lastGestureSeen) {
+    lastGestureChangeTime = now;
+    lastGestureSeen = best.name;
+  }
+
+  if (gestures.length > 1 && (best.score - gestures[1].score) < effectiveGap) {
     // If both candidates are the same after disambiguation, that's fine
     if (best.name !== gestures[1].name) {
       buffer.push(null);

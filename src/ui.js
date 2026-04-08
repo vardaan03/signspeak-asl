@@ -7,6 +7,7 @@
 import { alphabetReference } from './gestures/alphabet.js';
 import { commonSignsReference } from './gestures/commonSigns.js';
 import { customSignsReference } from './gestures/landmarkAnalyzer.js';
+import { numberReference } from './gestures/numberSigns.js';
 
 // DOM references
 let els = {};
@@ -41,6 +42,10 @@ export function initUI() {
     sideMenuContent: document.getElementById('side-menu-content'),
     sideMenuSearch: document.getElementById('side-menu-search'),
   };
+
+  // Build dynamic elements
+  buildPerformanceOverlay();
+  buildHistoryBar();
 
   buildReferenceGrid();
   buildSideMenu();
@@ -290,6 +295,15 @@ export function updateDetectedSign(name, confidence, stable) {
 
   els.confidenceText.textContent = `${confPercent.toFixed(0)}%`;
   els.confidenceBar.style.width = `${confPercent}%`;
+
+  // Color-coded confidence
+  if (confPercent < 40) {
+    els.confidenceBar.style.background = 'var(--red, #ef4444)';
+  } else if (confPercent < 70) {
+    els.confidenceBar.style.background = 'var(--yellow, #f59e0b)';
+  } else {
+    els.confidenceBar.style.background = 'var(--green, #22c55e)';
+  }
 }
 
 export function updateHoldProgress(progress, stable) {
@@ -376,4 +390,75 @@ export function getButtons() {
     clear: els.btnClear,
     speak: els.btnSpeak,
   };
+}
+
+// ============================
+// Performance Overlay
+// ============================
+
+function buildPerformanceOverlay() {
+  const overlay = document.createElement('div');
+  overlay.id = 'perf-overlay';
+  overlay.className = 'perf-overlay';
+  overlay.innerHTML = `
+    <span class="perf-item" id="perf-fps">-- FPS</span>
+    <span class="perf-item" id="perf-latency">-- ms</span>
+  `;
+  document.body.appendChild(overlay);
+
+  els.perfFps = document.getElementById('perf-fps');
+  els.perfLatency = document.getElementById('perf-latency');
+}
+
+export function updatePerformance(metrics) {
+  if (els.perfFps) {
+    els.perfFps.textContent = `${metrics.fpsDisplay} FPS`;
+    // Color-code FPS
+    if (metrics.fps < 15) {
+      els.perfFps.style.color = '#ef4444';
+    } else if (metrics.fps < 25) {
+      els.perfFps.style.color = '#f59e0b';
+    } else {
+      els.perfFps.style.color = '#22c55e';
+    }
+  }
+  if (els.perfLatency) {
+    els.perfLatency.textContent = `${metrics.latencyDisplay}`;
+  }
+}
+
+// ============================
+// Mini-History Bar
+// ============================
+
+const historyItems = [];
+const MAX_HISTORY = 5;
+
+function buildHistoryBar() {
+  const bar = document.createElement('div');
+  bar.id = 'history-bar';
+  bar.className = 'history-bar';
+  bar.innerHTML = `<span class="history-label">Recent:</span><span class="history-items" id="history-items"></span>`;
+
+  // Insert after candidates display or at the end of the detection panel
+  const detPanel = document.querySelector('.detection-panel') || document.body;
+  detPanel.appendChild(bar);
+
+  els.historyItems = document.getElementById('history-items');
+}
+
+export function addToHistory(gestureName) {
+  const displayChar = gestureName.length === 1 ? gestureName : gestureName.split(' ')[0];
+  const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  historyItems.push({ char: displayChar, time: timestamp });
+  if (historyItems.length > MAX_HISTORY) historyItems.shift();
+
+  if (els.historyItems) {
+    els.historyItems.innerHTML = historyItems
+      .map((item, i) => {
+        const opacity = 0.4 + (i / MAX_HISTORY) * 0.6;
+        return `<span class="history-entry" style="opacity:${opacity.toFixed(2)}" title="${item.time}">${item.char}</span>`;
+      })
+      .join('');
+  }
 }

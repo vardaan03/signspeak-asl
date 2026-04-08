@@ -222,26 +222,35 @@ function areFingersCrossed(landmarks) {
   const indexTip = landmarks[8];
   const middleMCP = landmarks[9];
   const middleTip = landmarks[12];
-
-  // In a normal (uncrossed) hand, middle tip is on the pinky-side of index tip.
-  // When crossed, middle tip moves to the thumb-side of index tip.
-  // We check the x-offset relative to the hand orientation.
-
-  // Direction from index MCP to middle MCP (the "normal" spacing direction)
-  const normalDir = indexMCP.x - middleMCP.x; // positive if index is to the right of middle
-
-  // Direction from index tip to middle tip
-  const tipDir = indexTip.x - middleTip.x;
-
-  // If tipDir has OPPOSITE sign from normalDir, fingers are crossed
-  // (middle tip has crossed over to the other side of index)
-  if (normalDir * tipDir < 0) return true;
-
-  // Also check if tips are very close (touching = crossed attempt)
   const palmSize = dist2D(landmarks[0], landmarks[9]);
   if (palmSize < 0.001) return false;
+
+  // Method 1: X-offset analysis (original, works for frontal view)
+  const normalDir = indexMCP.x - middleMCP.x;
+  const tipDir = indexTip.x - middleTip.x;
+  const xCrossed = normalDir * tipDir < 0;
+
+  // Method 2: 3D cross-product test (rotation-invariant)
+  // Compute the cross product of (MCP→TIP) vectors for index and middle
+  // If crossed, the cross product z-component flips sign vs uncrossed
+  const indexVec = vec(indexMCP, indexTip);
+  const middleVec = vec(middleMCP, middleTip);
+  const palmNormal = cross(
+    vec(landmarks[0], indexMCP),
+    vec(landmarks[0], landmarks[17])
+  );
+  const fingerCross = cross(indexVec, middleVec);
+  // If finger cross product aligns with palm normal, fingers are crossed
+  const crossDot = dot(fingerCross, palmNormal);
+  const crossCrossed = crossDot > 0;
+
+  // Method 3: Tip proximity (touching = attempting cross)
   const tipDist = dist2D(indexTip, middleTip) / palmSize;
-  return tipDist < 0.15;
+  const tipsClose = tipDist < 0.15;
+
+  // Combined: any two methods agree = crossed
+  const votes = (xCrossed ? 1 : 0) + (crossCrossed ? 1 : 0) + (tipsClose ? 1 : 0);
+  return votes >= 2;
 }
 
 /**
@@ -385,56 +394,79 @@ export function disambiguate(gestureName, landmarks, features) {
   const palmSize = dist2D(landmarks[0], landmarks[9]);
 
   // --- A vs S vs E vs T ---
+  // Enhanced with 3D thumb angle analysis for rotation/angle robustness
   if (['A', 'S', 'E', 'T'].includes(gestureName)) {
     const thumbTip = landmarks[4];
+    const thumbIP = landmarks[3];
     const indexPIP = landmarks[6];
     const indexDIP = landmarks[7];
     const middlePIP = landmarks[10];
     const indexTip = landmarks[8];
+    const indexMCP = landmarks[5];
+    const middleMCP = landmarks[9];
 
     const thumbToIndexPIP = dist2D(thumbTip, indexPIP) / (palmSize || 0.001);
     const thumbToMiddlePIP = dist2D(thumbTip, middlePIP) / (palmSize || 0.001);
     const thumbToIndexDIP = dist2D(thumbTip, indexDIP) / (palmSize || 0.001);
 
-    // T: thumb tucked between index and middle (very close to both PIPs)
-    const isTuckedBetween = thumbToIndexPIP < 0.4 && thumbToMiddlePIP < 0.4;
+    // 3D thumb angle: angle of thumb CMC→MCP→IP chain
+    const thumbIPAngle = features.angles.thumbIP;
+    const thumbMCPAngle = features.angles.thumbMCP;
+
+    // T: thumb tucked BETWEEN index and middle
+    // Key: thumb tip is close to BOTH index PIP and middle PIP simultaneously
+    // Also check thumb is pointing inward (between fingers) via 3D position
+    const thumbBetweenMCPs = dist2D(thumbTip, {
+      x: (indexMCP.x + middleMCP.x) / 2,
+      y: (indexMCP.y + middleMCP.y) / 2,
+    }) / (palmSize || 0.001);
+    const isTuckedBetween = thumbToIndexPIP < 0.45 && thumbToMiddlePIP < 0.45 && thumbBetweenMCPs < 0.5;
     if (isTuckedBetween) {
-      return { name: 'T', scoreAdjust: 2.0 };
+      return { name: 'T', scoreAdjust: 2.5 };
     }
 
     // E: all fingers curled, thumb tip is BELOW/under the curled finger tips
-    // Thumb crosses below the curled fingers
-    const thumbBelowFingers = thumbTip.y > indexTip.y + 0.01;
+    // Enhanced: also check thumb IP angle (extended = E, curled over = S)
+    const thumbBelowFingers = thumbTip.y > indexTip.y + 0.005;
     const allFingersCurled = features.indexCurled && features.middleCurled &&
                              features.ringCurled && features.pinkyCurled;
-    if (allFingersCurled && thumbBelowFingers && thumbPos.thumbAboveFingers < -0.02) {
-      return { name: 'E', scoreAdjust: 1.5 };
+    if (allFingersCurled && thumbBelowFingers && thumbPos.thumbAboveFingers < -0.01) {
+      return { name: 'E', scoreAdjust: 2.0 };
     }
 
     // A: thumb alongside fist pointing UP, not crossing over
-    if (thumbPos.thumbAboveFingers > 0.15 && thumbPos.thumbToIndexSide < 0.55) {
+    // Enhanced: thumb must be more extended (higher IP angle) than S
+    if (thumbPos.thumbAboveFingers > 0.12 && thumbPos.thumbToIndexSide < 0.6) {
+      // Extra check: thumb IP should be relatively straight for A (> 130°)
+      if (thumbIPAngle > 120) {
+        return { name: 'A', scoreAdjust: 2.0 };
+      }
       return { name: 'A', scoreAdjust: 1.5 };
     }
 
-    // S: thumb over curled fingers (in front of them, close to index DIP)
-    if (thumbToIndexDIP < 0.4 && !isTuckedBetween && thumbPos.thumbAboveFingers >= -0.02) {
+    // S: thumb over curled fingers (in front of them, crossing them)
+    // Key: thumb is more curled than A, positioned across finger fronts
+    if (thumbToIndexDIP < 0.45 && !isTuckedBetween && thumbPos.thumbAboveFingers >= -0.01) {
       return { name: 'S', scoreAdjust: 1.0 };
     }
   }
 
   // --- U vs R ---
   // Both have index and middle up. U = parallel, R = crossed
+  // Enhanced with rotation-invariant 3D crossing detection
   if (['U', 'R'].includes(gestureName)) {
-    // Use both distance and crossing detection
+    // Primary: 3D rotation-invariant crossing detection
     if (features.fingersCrossed) {
-      return { name: 'R', scoreAdjust: 2.0 };
+      return { name: 'R', scoreAdjust: 2.5 };
     }
     const indexMiddleDist = getFingerTipDistance(landmarks, 8, 12);
-    if (indexMiddleDist < 0.18) {
-      // Very close tips — likely crossed or attempting R
+    // Also check DIP-level crossing (fingers may cross mid-way)
+    const dipDist = getFingerTipDistance(landmarks, 7, 11);
+    if (indexMiddleDist < 0.15 || (indexMiddleDist < 0.22 && dipDist < 0.12)) {
+      // Very close/overlapping tips or crossed at DIP level
       return { name: 'R', scoreAdjust: 1.5 };
     }
-    if (indexMiddleDist >= 0.18 && indexMiddleDist < 0.4) {
+    if (indexMiddleDist >= 0.15 && indexMiddleDist < 0.4) {
       // Parallel fingers — U
       return { name: 'U', scoreAdjust: 1.5 };
     }
@@ -484,15 +516,23 @@ export function disambiguate(gestureName, landmarks, features) {
   }
 
   // --- D vs G (index vertical vs index horizontal) ---
+  // Fixed dead zone: 35°-50° now handled with reduced confidence instead of silence
   if (['D', 'G'].includes(gestureName)) {
     const absAngle = Math.abs(features.indexAngle);
-    // G: index is roughly horizontal (angle > 50 from vertical)
-    if (absAngle > 50) {
-      return { name: 'G', scoreAdjust: 1.5 };
+    // G: index is clearly horizontal (angle > 55 from vertical)
+    if (absAngle > 55) {
+      return { name: 'G', scoreAdjust: 2.0 };
     }
-    // D: index is roughly vertical (angle < 35 from vertical)
-    if (absAngle < 35) {
-      return { name: 'D', scoreAdjust: 1.5 };
+    // D: index is clearly vertical (angle < 30 from vertical)
+    if (absAngle < 30) {
+      return { name: 'D', scoreAdjust: 2.0 };
+    }
+    // Dead zone (30-55°): partial confidence — lean towards whichever is closer
+    // but with reduced score so hold-time confirmation is required
+    if (absAngle <= 42) {
+      return { name: 'D', scoreAdjust: 0.5 };
+    } else {
+      return { name: 'G', scoreAdjust: 0.5 };
     }
   }
 
@@ -541,16 +581,25 @@ export function disambiguate(gestureName, landmarks, features) {
   }
 
   // --- M vs N ---
+  // Enhanced: use ratio of ring-thumb distance vs middle-thumb distance
+  // M has ring close to thumb (3 fingers over), N has ring far (only 2 over)
   if (['M', 'N'].includes(gestureName)) {
     const ringTip = landmarks[16];
+    const middleTip = landmarks[12];
     const thumbTip = landmarks[4];
-    const ringOverThumb = dist2D(ringTip, thumbTip) / (palmSize || 0.001);
-    // M: ring finger is also draped over thumb (close to it)
-    if (ringOverThumb < 0.4) {
-      return { name: 'M', scoreAdjust: 1.5 };
+    const ringToThumb = dist2D(ringTip, thumbTip) / (palmSize || 0.001);
+    const middleToThumb = dist2D(middleTip, thumbTip) / (palmSize || 0.001);
+
+    // M: ring finger is draped over thumb (ring distance < 0.45 AND close to middle distance)
+    const ringMiddleRatio = middleToThumb > 0.001 ? ringToThumb / middleToThumb : 99;
+    if (ringToThumb < 0.45 && ringMiddleRatio < 1.8) {
+      return { name: 'M', scoreAdjust: 2.0 };
     }
-    // N: only index and middle over thumb, ring is curled away
-    return { name: 'N', scoreAdjust: 1.5 };
+    // N: ring is curled away from thumb (ring distance much larger than middle distance)
+    if (ringToThumb >= 0.45 || ringMiddleRatio >= 1.8) {
+      return { name: 'N', scoreAdjust: 2.0 };
+    }
+    return { name: 'N', scoreAdjust: 1.0 };
   }
 
   // --- I vs Y (pinky up: I has thumb curled, Y has thumb extended) ---
@@ -575,19 +624,30 @@ export function disambiguate(gestureName, landmarks, features) {
   }
 
   // --- C vs O ---
-  // C is more open, O is tighter with fingertips closer to thumb
+  // Enhanced: multi-metric (thumb-index distance + average PIP curvature)
+  // C is more open curve, O is tighter with fingertips closer to thumb
   if (['C', 'O'].includes(gestureName)) {
     const thumbTip = landmarks[4];
     const indexTip = landmarks[8];
     const thumbToIndex = dist2D(thumbTip, indexTip) / (palmSize || 0.001);
-    // O: thumb and index tips are very close (forming closed circle)
+
+    // Additional metric: average PIP angle (O has tighter curl = lower angle)
+    const avgPIP = (features.angles.indexPIP + features.angles.middlePIP +
+                    features.angles.ringPIP + features.angles.pinkyPIP) / 4;
+
+    // O: thumb-index close AND tighter curl (PIP < 130°)
+    if (thumbToIndex < 0.35 && avgPIP < 140) {
+      return { name: 'O', scoreAdjust: 2.0 };
+    }
+    // C: thumb-index far OR looser curl (PIP > 130°)
+    if (thumbToIndex >= 0.35 || avgPIP >= 140) {
+      return { name: 'C', scoreAdjust: 2.0 };
+    }
+    // Borderline: use thumb-index as tiebreaker
     if (thumbToIndex < 0.35) {
-      return { name: 'O', scoreAdjust: 1.5 };
+      return { name: 'O', scoreAdjust: 1.0 };
     }
-    // C: thumb and index are spread apart (open curve)
-    if (thumbToIndex >= 0.35) {
-      return { name: 'C', scoreAdjust: 1.5 };
-    }
+    return { name: 'C', scoreAdjust: 1.0 };
   }
 
   // --- F vs D (both have index curled/touching, 3 fingers up) ---

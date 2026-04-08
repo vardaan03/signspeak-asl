@@ -10,6 +10,12 @@ import { recognizeGesture, canAcceptGesture, markAccepted, resetBuffer, getHoldP
 import { drawLandmarks, drawSigningRegion } from './canvasOverlay.js';
 import { feedMirrorSample, getMirrorState } from './mirrorDetector.js';
 import {
+  initPerformanceMonitor,
+  frameStart,
+  frameEnd,
+  shouldSkipDetection,
+} from './performanceMonitor.js';
+import {
   initUI,
   showApp,
   showError,
@@ -22,6 +28,8 @@ import {
   updateCandidates,
   flashLetterAdded,
   getButtons,
+  updatePerformance,
+  addToHistory,
 } from './ui.js';
 
 // --- State ---
@@ -37,6 +45,14 @@ async function init() {
   try {
     // 1. Init UI
     initUI();
+
+    // Init performance monitor
+    initPerformanceMonitor({
+      onFpsUpdate: (metrics) => updatePerformance(metrics),
+      onPerformanceAlert: (alert) => {
+        console.warn('Performance alert:', alert.message);
+      },
+    });
 
     // 2. Request camera access
     updateLoadingText('Requesting camera access...');
@@ -101,6 +117,12 @@ function detectionLoop(timestamp) {
   if (!isRunning) return;
 
   if (videoElement.readyState >= 2) {
+    const perfStart = frameStart();
+
+    // Adaptive frame skipping: skip detection on alternate frames if latency is high
+    const skipDetection = shouldSkipDetection();
+
+    if (!skipDetection) {
     // 1. Detect hands
     const detection = detectHands(videoElement, timestamp);
 
@@ -142,6 +164,7 @@ function detectionLoop(timestamp) {
         if (gesture.holdReady && canAcceptGesture(gesture.name)) {
           addToSentence(gesture.name);
           markAccepted(gesture.name);
+          addToHistory(gesture.name);
         }
       } else {
         updateDetectedSign(null, 0, false);
@@ -165,6 +188,9 @@ function detectionLoop(timestamp) {
       updateHoldProgress(0, false);
       updateCandidates([]);
     }
+    } // end !skipDetection
+
+    frameEnd(perfStart);
   }
 
   requestAnimationFrame(detectionLoop);
