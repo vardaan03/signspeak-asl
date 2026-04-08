@@ -4,10 +4,7 @@
  * with custom SVG hand avatars instead of PNG images.
  */
 
-import { alphabetReference } from './gestures/alphabet.js';
-import { commonSignsReference } from './gestures/commonSigns.js';
-import { customSignsReference } from './gestures/landmarkAnalyzer.js';
-import { numberReference } from './gestures/numberSigns.js';
+import { getCurrentPack, onLanguageChange, setLanguage, getAvailableLanguages } from './languages/languageManager.js';
 
 // DOM references
 let els = {};
@@ -41,6 +38,7 @@ export function initUI() {
     sideMenuClose: document.getElementById('side-menu-close'),
     sideMenuContent: document.getElementById('side-menu-content'),
     sideMenuSearch: document.getElementById('side-menu-search'),
+    languageSelector: document.getElementById('language-selector'),
   };
 
   // Build dynamic elements
@@ -49,6 +47,21 @@ export function initUI() {
 
   buildReferenceGrid();
   buildSideMenu();
+
+  if (els.languageSelector) {
+    els.languageSelector.innerHTML = getAvailableLanguages()
+      .map(l => `<option value="${l.id}">${l.name}</option>`)
+      .join('');
+    els.languageSelector.value = getCurrentPack().id;
+    els.languageSelector.addEventListener('change', (e) => {
+      setLanguage(e.target.value);
+    });
+  }
+
+  onLanguageChange(() => {
+    buildReferenceGrid();
+    buildSideMenu();
+  });
 
   els.btnToggleRef.addEventListener('click', () => {
     els.referenceGrid.classList.toggle('collapsed');
@@ -79,98 +92,48 @@ function buildReferenceGrid() {
 }
 
 function buildSideMenu() {
+  const pack = getCurrentPack();
   let html = '';
 
-  // --- Alphabet ---
-  html += `
-    <div class="side-menu-section">
-      <h3 class="side-menu-section-title">Alphabet (A-Z)</h3>
-      <p class="side-menu-section-subtitle">Fingerspelling \u2014 hold each sign for detection</p>
-      <div class="side-menu-image-gallery">
-        <img src="/signs/asl_alphabet_am.png" alt="ASL Alphabet A through M" class="side-menu-chart-img" loading="lazy" />
-        <img src="/signs/asl_alphabet_nz.png" alt="ASL Alphabet N through Z" class="side-menu-chart-img" loading="lazy" />
-      </div>
-      <div class="side-menu-grid">
-  `;
-
-  for (const item of alphabetReference) {
-    const isMotion = item.desc.includes('Trace');
-    const badge = isMotion
-      ? '<span class="side-badge badge-motion">MOTION</span>'
-      : '<span class="side-badge badge-static">STATIC</span>';
-    const cardClass = isMotion ? 'side-menu-card motion-sign' : 'side-menu-card';
-
+  for (const section of pack.getReferenceData()) {
     html += `
-      <div class="${cardClass}" data-search="${item.letter} ${item.desc}">
-        <div class="side-menu-card-letter">${item.letter}</div>
-        <div class="side-menu-card-info">
-          <span class="side-menu-card-name">${item.letter}</span>
-          <span class="side-menu-card-desc">${item.desc}</span>
-          ${badge}
-        </div>
-      </div>
+      <div class="side-menu-section">
+        <h3 class="side-menu-section-title">${section.title}</h3>
+        <div class="side-menu-grid">
     `;
-  }
 
-  html += `</div></div>`;
+    for (const item of section.items) {
+      const isBody = item.bodyRelative;
+      const isMotion = item.motion || (item.desc && item.desc.includes('Trace'));
+      const badge = isBody
+        ? '<span class="side-badge badge-body">BODY</span>'
+        : isMotion
+          ? '<span class="side-badge badge-motion">MOTION</span>'
+          : '<span class="side-badge badge-static">STATIC</span>';
+      
+      const cardClass = isBody 
+        ? 'side-menu-card body-sign' 
+        : isMotion 
+          ? 'side-menu-card motion-sign' 
+          : 'side-menu-card';
+          
+      const displayLetter = item.letter || item.name;
+      const displayName = item.name || item.letter;
 
-  // --- Common signs ---
-  html += `
-    <div class="side-menu-section">
-      <h3 class="side-menu-section-title">Common Signs</h3>
-      <p class="side-menu-section-subtitle">Basic gestures detected by finger position</p>
-      <div class="side-menu-image-gallery">
-        <img src="/signs/asl_common_signs.png" alt="Common ASL Signs Reference" class="side-menu-chart-img" loading="lazy" />
-      </div>
-      <div class="side-menu-grid">
-  `;
-
-  for (const item of commonSignsReference) {
-    html += `
-      <div class="side-menu-card" data-search="${item.letter} ${item.desc}">
-        <div class="side-menu-card-letter">${item.letter}</div>
-        <div class="side-menu-card-info">
-          <span class="side-menu-card-name">${item.letter}</span>
-          <span class="side-menu-card-desc">${item.desc}</span>
-          <span class="side-badge badge-static">STATIC</span>
+      html += `
+        <div class="${cardClass}" data-search="${displayLetter} ${item.desc || ''}">
+          <div class="side-menu-card-letter">${displayLetter}</div>
+          <div class="side-menu-card-info">
+            <span class="side-menu-card-name">${displayName}</span>
+            <span class="side-menu-card-desc">${item.desc || ''}</span>
+            ${badge}
+          </div>
         </div>
-      </div>
-    `;
+      `;
+    }
+
+    html += `</div></div>`;
   }
-
-  html += `</div></div>`;
-
-  // --- Advanced gestures ---
-  html += `
-    <div class="side-menu-section">
-      <h3 class="side-menu-section-title">Advanced Gestures</h3>
-      <p class="side-menu-section-subtitle">Body-relative and 3D analysis gestures</p>
-      <div class="side-menu-grid">
-  `;
-
-  for (const item of customSignsReference) {
-    const isBody = item.bodyRelative;
-    const isMotion = item.motion;
-    const badge = isBody
-      ? '<span class="side-badge badge-body">BODY</span>'
-      : isMotion
-        ? '<span class="side-badge badge-motion">MOTION</span>'
-        : '<span class="side-badge badge-static">GESTURE</span>';
-    const cardClass = isBody ? 'side-menu-card body-sign' : 'side-menu-card';
-
-    html += `
-      <div class="${cardClass}" data-search="${item.name} ${item.desc}">
-        <div class="side-menu-card-letter">${item.letter}</div>
-        <div class="side-menu-card-info">
-          <span class="side-menu-card-name">${item.name}</span>
-          <span class="side-menu-card-desc">${item.desc}</span>
-          ${badge}
-        </div>
-      </div>
-    `;
-  }
-
-  html += `</div></div>`;
 
   // --- Tips ---
   html += `

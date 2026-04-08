@@ -15,11 +15,8 @@
  */
 
 import fp from 'fingerpose';
-import { alphabetGestures } from './gestures/alphabet.js';
-import { commonGestures } from './gestures/commonSigns.js';
-import { numberGestures } from './gestures/numberSigns.js';
-import { analyzeCustomGestures, extractHandFeatures, disambiguate } from './gestures/landmarkAnalyzer.js';
-import { recordTrajectory, detectMotionSigns, resetTrajectory } from './gestures/trajectoryTracker.js';
+import { extractHandFeatures } from './gestures/landmarkAnalyzer.js';
+import { getCurrentPack, onLanguageChange } from './languages/languageManager.js';
 
 // --- Tuning Constants (accuracy-optimized) ---
 const BUFFER_SIZE = 10;               // Larger buffer for better stability
@@ -49,10 +46,15 @@ const COARTICULATION_GAP_BOOST = 1.5;   // Extra ambiguity gap during rapid chan
 let lastGestureChangeTime = 0;
 let lastGestureSeen = null;
 
-// Include number gestures in the gesture set (disabled by default to avoid letter conflicts)
-// Uncomment numberGestures to enable: [...alphabetGestures, ...commonGestures, ...numberGestures]
-const allGestures = [...alphabetGestures, ...commonGestures];
-const estimator = new fp.GestureEstimator(allGestures);
+// Active Language Pack & Estimator State
+let currentPack = getCurrentPack();
+let estimator = new fp.GestureEstimator(currentPack.getGestures());
+
+onLanguageChange((newPack) => {
+  currentPack = newPack;
+  estimator = new fp.GestureEstimator(currentPack.getGestures());
+  resetBuffer();
+});
 
 // Rolling buffer with timestamps for weighted scoring
 let buffer = [];
@@ -293,7 +295,9 @@ export function recognizeGesture(landmarks, face) {
   const { fast: fastSmoothed, slow: slowSmoothed } = applyEMA(landmarks);
 
   // Record trajectory for motion signs — use FAST smoothed (responsive to movement)
-  recordTrajectory(fastSmoothed);
+  if (currentPack.recordTrajectory) {
+    currentPack.recordTrajectory(fastSmoothed);
+  }
 
   // Check signing region — use slow smoothed for stability
   const inRegion = isInSigningRegion(slowSmoothed);
@@ -305,7 +309,10 @@ export function recognizeGesture(landmarks, face) {
   const features = extractHandFeatures(slowSmoothed);
 
   // --- Motion-based signs (J, Z) — use raw landmarks for motion sensitivity ---
-  const motionResults = detectMotionSigns(landmarks, features);
+  let motionResults = [];
+  if (currentPack.detectMotionSigns) {
+    motionResults = currentPack.detectMotionSigns(landmarks, features) || [];
+  }
   if (motionResults.length > 0) {
     const best = motionResults[0];
     return {
@@ -353,7 +360,7 @@ export function recognizeGesture(landmarks, face) {
 
     // Disambiguate top result
     const topName = sorted[0].name;
-    const disambResult = disambiguate(topName, slowSmoothed, features);
+    const disambResult = currentPack.disambiguate ? currentPack.disambiguate(topName, slowSmoothed, features) : null;
     if (disambResult) {
       sorted[0] = {
         name: disambResult.name,
@@ -363,7 +370,7 @@ export function recognizeGesture(landmarks, face) {
 
     // Also disambiguate second result if close to first
     if (sorted.length > 1 && (sorted[0].score - sorted[1].score) < 2.0) {
-      const secondDisamb = disambiguate(sorted[1].name, slowSmoothed, features);
+      const secondDisamb = currentPack.disambiguate ? currentPack.disambiguate(sorted[1].name, slowSmoothed, features) : null;
       if (secondDisamb) {
         sorted[1] = {
           name: secondDisamb.name,
@@ -488,5 +495,7 @@ export function resetBuffer() {
   isCurrentlyIdle = false;
   smoothedLandmarksFast = null;
   smoothedLandmarksSlow = null;
-  resetTrajectory();
+  if (currentPack.resetTrajectory) {
+    currentPack.resetTrajectory();
+  }
 }
