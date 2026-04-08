@@ -714,3 +714,224 @@ body {
 :root {
   --yellow: #f59e0b;
 }
+
+/* ==========================================
+   AI REFINE BUTTON
+   ========================================== */
+.btn-ai {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.12), rgba(94, 240, 208, 0.08));
+  border-color: rgba(167, 139, 250, 0.3);
+  color: var(--purple);
+  position: relative;
+  overflow: hidden;
+}
+.btn-ai:hover {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.2), rgba(94, 240, 208, 0.15));
+  box-shadow: 0 0 16px rgba(167, 139, 250, 0.2);
+  color: #c4b5fd;
+}
+.btn-ai.loading {
+  pointer-events: none;
+  opacity: 0.7;
+}
+.btn-ai.loading::after {
+  content: '';
+  position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(167, 139, 250, 0.15), transparent);
+  animation: aiShimmer 1.5s infinite;
+}
+@keyframes aiShimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.btn-sm { padding: 4px 10px; font-size: 0.68rem; }
+
+/* ==========================================
+   AI RESULT BOX
+   ========================================== */
+.ai-result-box {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.06), rgba(94, 240, 208, 0.04));
+  border: 1px solid rgba(167, 139, 250, 0.2);
+  animation: aiResultFadeIn 300ms ease-out;
+}
+@keyframes aiResultFadeIn {
+  0% { opacity: 0; transform: translateY(-6px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+.ai-result-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 6px;
+}
+.ai-result-label {
+  font-size: 0.65rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 1px; color: var(--purple);
+}
+.ai-result-text {
+  font-family: var(--mono); font-size: 1rem; font-weight: 500;
+  color: var(--text); line-height: 1.6;
+  padding: 6px 0;
+}
+.ai-result-text.error {
+  color: var(--red); font-size: 0.8rem;
+}
+
+/* ==========================================
+   AI STATUS PILL (HEADER)
+   ========================================== */
+.ai-status-pill {
+  display: flex; align-items: center; gap: 5px;
+  padding: 3px 10px;
+  border-radius: 100px;
+  font-size: 0.62rem; font-weight: 600;
+  background: rgba(80, 90, 160, 0.06);
+  border: 1px solid var(--border);
+  transition: all 200ms;
+}
+.ai-status-pill.active {
+  border-color: rgba(94, 240, 160, 0.25);
+  background: rgba(94, 240, 160, 0.06);
+}
+.ai-dot {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--text3);
+  transition: all 200ms;
+}
+.ai-status-pill.active .ai-dot {
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(94, 240, 160, 0.5);
+}
+
+/* ==========================================
+   TRANSLATION LOG
+   ========================================== */
+.log-box {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 12px 16px;
+}
+.log-top-row {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 6px;
+}
+.log-label {
+  font-size: 0.65rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 1.5px; color: var(--text3);
+}
+.translation-log {
+  max-height: 160px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.log-placeholder {
+  color: var(--text3); font-style: italic; font-size: 0.75rem;
+}
+.log-entry {
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  background: rgba(80, 90, 160, 0.04);
+  border: 1px solid rgba(80, 90, 160, 0.06);
+  animation: logSlideIn 300ms ease-out;
+}
+@keyframes logSlideIn {
+  0% { opacity: 0; transform: translateX(-8px); }
+  100% { opacity: 1; transform: translateX(0); }
+}
+.log-raw {
+  font-size: 0.7rem; color: var(--text3);
+  font-family: var(--mono);
+  margin-bottom: 2px;
+}
+.log-refined {
+  font-size: 0.82rem; color: var(--text);
+  font-family: var(--mono); font-weight: 500;
+}
+.log-time {
+  font-size: 0.55rem; color: var(--text3);
+  margin-top: 2px;
+}
+
+/* ==========================================
+   SETTINGS MODAL
+   ========================================== */
+.settings-overlay {
+  position: fixed; inset: 0; z-index: 600;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  animation: settingsFadeIn 200ms ease-out;
+}
+@keyframes settingsFadeIn {
+  0% { opacity: 0; }
+  100% { opacity: 1; }
+}
+.settings-modal {
+  width: 440px; max-width: 90vw;
+  background: linear-gradient(180deg, #0e0e22 0%, var(--bg) 100%);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  animation: settingsSlideUp 300ms cubic-bezier(.4,0,.2,1);
+}
+@keyframes settingsSlideUp {
+  0% { transform: translateY(20px); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+.settings-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.settings-title {
+  font-size: 1rem; font-weight: 700; color: var(--text);
+}
+.settings-body {
+  padding: 20px;
+}
+.settings-section { margin-bottom: 16px; }
+.settings-section-title {
+  font-size: 0.85rem; font-weight: 600; color: var(--purple);
+  margin-bottom: 6px;
+}
+.settings-desc {
+  font-size: 0.72rem; color: var(--text2); line-height: 1.5;
+  margin-bottom: 12px;
+}
+.settings-field { margin-bottom: 10px; }
+.settings-label {
+  font-size: 0.68rem; font-weight: 600; color: var(--text3);
+  text-transform: uppercase; letter-spacing: 1px;
+  margin-bottom: 4px; display: block;
+}
+.settings-input-row {
+  display: flex; gap: 6px; align-items: center;
+}
+.settings-input {
+  flex: 1; padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: rgba(11, 11, 20, 0.6);
+  color: var(--text); font-family: var(--mono); font-size: 0.8rem;
+  outline: none; transition: all 150ms;
+}
+.settings-input:focus {
+  border-color: var(--purple);
+  box-shadow: 0 0 8px rgba(167, 139, 250, 0.15);
+}
+.settings-hint {
+  font-size: 0.62rem; color: var(--text3); margin-top: 6px;
+}
+.settings-hint a {
+  color: var(--cyan); text-decoration: none;
+}
+.settings-hint a:hover { text-decoration: underline; }
+.key-status {
+  font-size: 0.72rem; padding: 6px 0;
+  min-height: 24px;
+}
+.key-status.success { color: var(--green); }
+.key-status.error { color: var(--red); }
+

@@ -2,7 +2,7 @@
  * SignSpeak — Main Application Module
  * 
  * Wires together: camera → hand detection → gesture recognition → UI
- * Includes auto-mirror detection and text-to-speech
+ * Includes auto-mirror detection, text-to-speech, and Gemini AI refinement
  */
 
 import { initHandDetector, detectHands } from './handDetector.js';
@@ -31,6 +31,14 @@ import {
   updatePerformance,
   addToHistory,
 } from './ui.js';
+import {
+  setGeminiApiKey,
+  restoreApiKey,
+  hasApiKey,
+  clearApiKey,
+  refineSentence,
+  getAIStatus,
+} from './geminiRefiner.js';
 
 // --- State ---
 let sentence = '';
@@ -261,6 +269,12 @@ function setupControls() {
     speakSentence();
   });
 
+  // AI Refine button
+  setupAI();
+
+  // Settings modal
+  setupSettings();
+
   // Keyboard shortcuts
   document.addEventListener('keydown', (e) => {
     if (e.key === ' ' && e.target === document.body) {
@@ -316,6 +330,171 @@ if ('speechSynthesis' in window) {
   window.speechSynthesis.onvoiceschanged = () => {
     // Voices loaded
   };
+}
+
+// --- AI Refinement ---
+function updateAIStatusUI() {
+  const status = getAIStatus();
+  const pill = document.getElementById('ai-status');
+  const text = document.getElementById('ai-status-text');
+  if (pill && text) {
+    text.textContent = status.label;
+    if (status.configured) {
+      pill.classList.add('active');
+    } else {
+      pill.classList.remove('active');
+    }
+  }
+}
+
+function setupAI() {
+  // Restore API key from session
+  restoreApiKey();
+  updateAIStatusUI();
+
+  const btnRefine = document.getElementById('btn-refine');
+  const aiResultBox = document.getElementById('ai-result-box');
+  const aiResultText = document.getElementById('ai-result-text');
+  const btnUseRefined = document.getElementById('btn-use-refined');
+
+  if (btnRefine) {
+    btnRefine.addEventListener('click', async () => {
+      if (!hasApiKey()) {
+        // Open settings if no key
+        openSettings();
+        return;
+      }
+
+      if (!sentence.trim()) return;
+
+      // Show loading state
+      btnRefine.classList.add('loading');
+      btnRefine.textContent = '⏳ Refining...';
+
+      const result = await refineSentence(sentence);
+
+      btnRefine.classList.remove('loading');
+      btnRefine.textContent = '✨ Refine with AI';
+
+      if (aiResultBox && aiResultText) {
+        aiResultBox.classList.remove('hidden');
+
+        if (result.success) {
+          aiResultText.textContent = result.refined;
+          aiResultText.classList.remove('error');
+          addToTranslationLog(sentence, result.refined);
+        } else {
+          aiResultText.textContent = result.error;
+          aiResultText.classList.add('error');
+        }
+      }
+    });
+  }
+
+  if (btnUseRefined) {
+    btnUseRefined.addEventListener('click', () => {
+      if (aiResultText && !aiResultText.classList.contains('error')) {
+        sentence = aiResultText.textContent;
+        updateSentence(sentence);
+      }
+    });
+  }
+}
+
+// --- Translation Log ---
+const translationLog = [];
+
+function addToTranslationLog(raw, refined) {
+  const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  translationLog.unshift({ raw, refined, time });
+  if (translationLog.length > 20) translationLog.pop();
+  renderTranslationLog();
+}
+
+function renderTranslationLog() {
+  const logEl = document.getElementById('translation-log');
+  if (!logEl) return;
+
+  logEl.innerHTML = translationLog
+    .map(entry => `
+      <div class="log-entry">
+        <div class="log-raw">${entry.raw}</div>
+        <div class="log-refined">→ ${entry.refined}</div>
+        <div class="log-time">${entry.time}</div>
+      </div>
+    `)
+    .join('');
+}
+
+// --- Settings Modal ---
+function openSettings() {
+  const overlay = document.getElementById('settings-overlay');
+  if (overlay) overlay.classList.remove('hidden');
+}
+
+function closeSettings() {
+  const overlay = document.getElementById('settings-overlay');
+  if (overlay) overlay.classList.add('hidden');
+}
+
+function setupSettings() {
+  const btnSettings = document.getElementById('btn-settings');
+  const btnClose = document.getElementById('settings-close');
+  const overlay = document.getElementById('settings-overlay');
+  const btnSaveKey = document.getElementById('btn-save-key');
+  const btnClearKey = document.getElementById('btn-clear-key');
+  const keyInput = document.getElementById('gemini-key-input');
+  const keyStatus = document.getElementById('key-status');
+  const btnClearLog = document.getElementById('btn-clear-log');
+
+  if (btnSettings) btnSettings.addEventListener('click', openSettings);
+  if (btnClose) btnClose.addEventListener('click', closeSettings);
+  if (overlay) {
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) closeSettings();
+    });
+  }
+
+  if (btnSaveKey && keyInput && keyStatus) {
+    btnSaveKey.addEventListener('click', () => {
+      const key = keyInput.value.trim();
+      if (!key) {
+        keyStatus.textContent = 'Please enter an API key.';
+        keyStatus.className = 'key-status error';
+        return;
+      }
+      setGeminiApiKey(key);
+      keyStatus.textContent = '✓ API key saved for this session.';
+      keyStatus.className = 'key-status success';
+      keyInput.value = '';
+      updateAIStatusUI();
+    });
+  }
+
+  if (btnClearKey && keyStatus) {
+    btnClearKey.addEventListener('click', () => {
+      clearApiKey();
+      keyStatus.textContent = 'API key cleared.';
+      keyStatus.className = 'key-status';
+      updateAIStatusUI();
+    });
+  }
+
+  if (btnClearLog) {
+    btnClearLog.addEventListener('click', () => {
+      translationLog.length = 0;
+      const logEl = document.getElementById('translation-log');
+      if (logEl) {
+        logEl.innerHTML = '<span class="log-placeholder">Translations will appear here...</span>';
+      }
+    });
+  }
+
+  // Show saved state on load
+  if (hasApiKey() && keyStatus) {
+    keyStatus.textContent = '✓ API key loaded from session.';
+    keyStatus.className = 'key-status success';
+  }
 }
 
 // --- Start the app ---
